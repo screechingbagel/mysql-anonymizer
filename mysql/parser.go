@@ -31,7 +31,7 @@
 //
 // # Escape sequences in string cells
 //
-// mysqldump escapes single-quote as \' (backslash-quote) and also as ''
+// mysqldump escapes single-quote as \' (backslash-quote) and also as ”
 // (doubled quote). Both are correctly handled during reading. On output,
 // substituted values have ' escaped to \' and \ escaped to \\.
 package mysql
@@ -228,13 +228,13 @@ func (p *parser) parseInsertLine(line []byte) error {
 	// Extract table name.
 	// Line: INSERT INTO `tablename` VALUES ...
 	after := line[len("INSERT INTO `"):]
-	end := bytes.IndexByte(after, '`')
-	if end < 0 {
+	before, after0, ok := bytes.Cut(after, []byte{'`'})
+	if !ok {
 		// Malformed; pass through.
 		_, err := p.bw.Write(line)
 		return err
 	}
-	tableName := string(after[:end])
+	tableName := string(before)
 	colNames := p.tables[tableName] // may be nil (no CREATE TABLE seen)
 
 	// Find the VALUES keyword and collect the entire rest of the statement.
@@ -242,7 +242,7 @@ func (p *parser) parseInsertLine(line []byte) error {
 
 	// remainder starts after the table name backtick.
 	// We need to find "VALUES" then the opening "(" of the first row.
-	rest := after[end+1:]
+	rest := after0
 
 	// The full VALUES payload may span multiple lines. Read until we see ";\n"
 	// or bare ";" at end of last row.
@@ -276,7 +276,7 @@ func (p *parser) parseInsertLine(line []byte) error {
 		return err
 	}
 
-	// Write "VALUES" keyword and any space up to the first "(". 
+	// Write "VALUES" keyword and any space up to the first "(".
 	// Then parse and rewrite rows.
 	if _, err := p.bw.WriteString("VALUES"); err != nil {
 		return err
@@ -515,16 +515,16 @@ func (p *parser) writeRow(vals []string, wasQuoted []bool) error {
 // extractBacktickName extracts the identifier between the first pair of
 // backticks in b. Returns ("", false) if none found.
 func extractBacktickName(b []byte) (string, bool) {
-	start := bytes.IndexByte(b, '`')
-	if start < 0 {
+	_, after, ok := bytes.Cut(b, []byte{'`'})
+	if !ok {
 		return "", false
 	}
-	rest := b[start+1:]
-	end := bytes.IndexByte(rest, '`')
-	if end < 0 {
+	rest := after
+	before, _, ok := bytes.Cut(rest, []byte{'`'})
+	if !ok {
 		return "", false
 	}
-	return string(rest[:end]), true
+	return string(before), true
 }
 
 // writeSQLEscaped writes s to w, escaping backslashes and single quotes
