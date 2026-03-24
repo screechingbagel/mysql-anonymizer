@@ -1,0 +1,330 @@
+package mysql
+
+import (
+	"bytes"
+	"strings"
+	"testing"
+
+	"data-anonymizer/faker"
+)
+
+// ─── Test Applier implementations ─────────────────────────────────────────────
+
+// staticApplier replaces specific columns with fixed values.
+type staticApplier struct {
+	// rules: table → column → replacement value (or faker.SentinelNULL)
+	rules map[string]map[string]string
+}
+
+func (a *staticApplier) Apply(table string, colNames []string, vals []string) (bool, error) {
+	tr, ok := a.rules[table]
+	if !ok {
+		return false, nil
+	}
+	for i, col := range colNames {
+		if v, ok := tr[col]; ok {
+			vals[i] = v
+		}
+	}
+	return false, nil
+}
+
+// dropApplier drops every row for configured tables.
+type dropApplier struct{ tables map[string]bool }
+
+func (a *dropApplier) Apply(table string, _ []string, _ []string) (bool, error) {
+	return a.tables[table], nil
+}
+
+// passthroughApplier makes no changes.
+type passthroughApplier struct{}
+
+func (passthroughApplier) Apply(_ string, _ []string, _ []string) (bool, error) {
+	return false, nil
+}
+
+// ─── Helper ───────────────────────────────────────────────────────────────────
+
+func run(t *testing.T, input string, a Applier) string {
+	t.Helper()
+	var out bytes.Buffer
+	if err := Parse(strings.NewReader(input), &out, a); err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+	return out.String()
+}
+
+// ─── Tests ────────────────────────────────────────────────────────────────────
+
+// TestPassthrough verifies that lines with no INSERT INTO or CREATE TABLE are
+// copied verbatim.
+func TestPassthrough(t *testing.T) {
+	input := "-- MariaDB dump 10.19\n" +
+		"/*!40101 SET NAMES utf8mb4 */;\n" +
+		"LOCK TABLES `foo` WRITE;\n" +
+		"UNLOCK TABLES;\n"
+
+	got := run(t, input, passthroughApplier{})
+	if got != input {
+		t.Fatalf("expected passthrough unchanged\ngot: %q\nwant: %q", got, input)
+	}
+}
+
+// TestCreateTablePassthrough checks that CREATE TABLE DDL is copied verbatim.
+func TestCreateTablePassthrough(t *testing.T) {
+	input := "CREATE TABLE `users` (\n" +
+		"  `id` int NOT NULL AUTO_INCREMENT,\n" +
+		"  `email` varchar(255) NOT NULL,\n" +
+		"  PRIMARY KEY (`id`)\n" +
+		") ENGINE=InnoDB;\n"
+
+	got := run(t, input, passthroughApplier{})
+	if got != input {
+		t.Fatalf("CREATE TABLE should pass through unchanged\ngot: %q\nwant: %q", got, input)
+	}
+}
+
+// TestSingleRowRule replaces one column in a single-row INSERT.
+func TestSingleRowRule(t *testing.T) {
+	input := "CREATE TABLE `users` (\n" +
+		"  `id` int NOT NULL,\n" +
+		"  `email` varchar(255) NOT NULL,\n" +
+		"  `name` varchar(100) NOT NULL,\n" +
+		"  PRIMARY KEY (`id`)\n" +
+		") ENGINE=InnoDB;\n" +
+		"INSERT INTO `users` VALUES (1,'original@example.com','Alice');\n"
+
+	a := &staticApplier{rules: map[string]map[string]string{
+		"users": {"email": "anon@example.com"},
+	}}
+
+	got := run(t, input, a)
+
+	if !strings.Contains(got, "'anon@example.com'") {
+		t.Fatalf("expected replaced email in output\ngot: %s", got)
+	}
+	if strings.Contains(got, "original@example.com") {
+		t.Fatalf("original email should be gone\ngot: %s", got)
+	}
+	// id and name should be unchanged.
+	if !strings.Contains(got, "1,") {
+		t.Fatalf("numeric id should be unchanged\ngot: %s", got)
+	}
+	if !strings.Contains(got, "'Alice'") {
+		t.Fatalf("name should be unchanged\ngot: %s", got)
+	}
+}
+
+// TestMultiRowInline checks multiple rows in one VALUES list on a single line.
+func TestMultiRowInline(t *testing.T) {
+	input := "CREATE TABLE `t` (\n" +
+		"  `id` int NOT NULL,\n" +
+		"  `val` varchar(50) NOT NULL\n" +
+		") ENGINE=InnoDB;\n" +
+		"INSERT INTO `t` VALUES (1,'alpha'),(2,'beta'),(3,'gamma');\n"
+
+	a := &staticApplier{rules: map[string]map[string]string{
+		"t": {"val": "REPLACED"},
+	}}
+
+	got := run(t, input, a)
+
+	if strings.Count(got, "'REPLACED'") != 3 {
+		t.Fatalf("expected 3 replaced values\ngot: %s", got)
+	}
+	for _, orig := range []string{"alpha", "beta", "gamma"} {
+		if strings.Contains(got, orig) {
+			t.Fatalf("original value %q should be gone\ngot: %s", orig, got)
+		}
+	}
+}
+
+// TestMultiLineValues checks VALUES rows that span multiple lines
+// (mysqldump's extended-insert format with each row on its own line).
+func TestMultiLineValues(t *testing.T) {
+	input := "CREATE TABLE `t` (\n" +
+		"  `id` int NOT NULL,\n" +
+		"  `val` varchar(50) NOT NULL\n" +
+		") ENGINE=InnoDB;\n" +
+		"INSERT INTO `t` VALUES (1,'first'),\n" +
+		"(2,'second'),\n" +
+		"(3,'third');\n"
+
+	a := &staticApplier{rules: map[string]map[string]string{
+		"t": {"val": "X"},
+	}}
+
+	got := run(t, input, a)
+
+	if strings.Count(got, "'X'") != 3 {
+		t.Fatalf("expected 3 replacements\ngot: %s", got)
+	}
+}
+
+// TestNullReplacement checks that a rule returning ::NULL:: is rendered as SQL NULL.
+func TestNullReplacement(t *testing.T) {
+	input := "CREATE TABLE `t` (\n" +
+		"  `id` int NOT NULL,\n" +
+		"  `secret` varchar(100)\n" +
+		") ENGINE=InnoDB;\n" +
+		"INSERT INTO `t` VALUES (1,'sensitive-data');\n"
+
+	a := &staticApplier{rules: map[string]map[string]string{
+		"t": {"secret": faker.SentinelNULL},
+	}}
+
+	got := run(t, input, a)
+
+	if !strings.Contains(got, "NULL") {
+		t.Fatalf("expected NULL in output\ngot: %s", got)
+	}
+	if strings.Contains(got, "sensitive-data") {
+		t.Fatalf("original value should be gone\ngot: %s", got)
+	}
+}
+
+// TestBareNullPassthrough checks that a bare NULL cell (no rule) is passed through.
+func TestBareNullPassthrough(t *testing.T) {
+	input := "CREATE TABLE `t` (\n" +
+		"  `id` int NOT NULL,\n" +
+		"  `opt` varchar(100)\n" +
+		") ENGINE=InnoDB;\n" +
+		"INSERT INTO `t` VALUES (1,NULL);\n"
+
+	got := run(t, input, passthroughApplier{})
+
+	if !strings.Contains(got, "NULL") {
+		t.Fatalf("bare NULL should pass through\ngot: %s", got)
+	}
+}
+
+// TestEscapedQuoteInCell checks that a cell with an escaped single quote (\\')
+// is read and written correctly.
+func TestEscapedQuoteInCell(t *testing.T) {
+	input := "CREATE TABLE `t` (\n" +
+		"  `id` int NOT NULL,\n" +
+		"  `note` text\n" +
+		") ENGINE=InnoDB;\n" +
+		"INSERT INTO `t` VALUES (1,'it\\'s here');\n"
+
+	// No rule: should pass through unchanged.
+	got := run(t, input, passthroughApplier{})
+
+	if !strings.Contains(got, `it\'s here`) {
+		t.Fatalf("escaped quote should be preserved\ngot: %s", got)
+	}
+}
+
+// TestNoRuleTable verifies that a table with no configured rules passes through.
+func TestNoRuleTable(t *testing.T) {
+	input := "CREATE TABLE `untouched` (\n" +
+		"  `id` int NOT NULL,\n" +
+		"  `data` varchar(100)\n" +
+		") ENGINE=InnoDB;\n" +
+		"INSERT INTO `untouched` VALUES (42,'keep-this');\n"
+
+	a := &staticApplier{rules: map[string]map[string]string{
+		"other_table": {"col": "x"},
+	}}
+
+	got := run(t, input, a)
+
+	if !strings.Contains(got, "keep-this") {
+		t.Fatalf("unconfigured table should pass through\ngot: %s", got)
+	}
+}
+
+// TestNoRuleColumn verifies that a column with no rule passes through while
+// other columns in the same table are transformed.
+func TestNoRuleColumn(t *testing.T) {
+	input := "CREATE TABLE `t` (\n" +
+		"  `id` int NOT NULL,\n" +
+		"  `email` varchar(100),\n" +
+		"  `preserve` varchar(100)\n" +
+		") ENGINE=InnoDB;\n" +
+		"INSERT INTO `t` VALUES (7,'old@x.com','keep-me');\n"
+
+	a := &staticApplier{rules: map[string]map[string]string{
+		"t": {"email": "new@x.com"},
+	}}
+
+	got := run(t, input, a)
+
+	if !strings.Contains(got, "'keep-me'") {
+		t.Fatalf("column without rule should be unchanged\ngot: %s", got)
+	}
+	if !strings.Contains(got, "'new@x.com'") {
+		t.Fatalf("column with rule should be replaced\ngot: %s", got)
+	}
+}
+
+// TestDropRow checks that a table using the drop applier produces no row output.
+func TestDropRow(t *testing.T) {
+	input := "CREATE TABLE `t` (\n" +
+		"  `id` int NOT NULL\n" +
+		") ENGINE=InnoDB;\n" +
+		"INSERT INTO `t` VALUES (1),(2),(3);\n"
+
+	a := &dropApplier{tables: map[string]bool{"t": true}}
+
+	got := run(t, input, a)
+
+	// The INSERT INTO header should be present, but no rows (nothing between VALUES and ;).
+	// Our parser writes the INSERT prefix, then no rows, then ";".
+	if strings.Contains(got, "(1)") || strings.Contains(got, "(2)") || strings.Contains(got, "(3)") {
+		t.Fatalf("dropped rows should not appear in output\ngot: %s", got)
+	}
+}
+
+// TestEscapeOnReplacement checks that a substituted value containing a
+// single-quote is properly escaped in the output.
+func TestEscapeOnReplacement(t *testing.T) {
+	input := "CREATE TABLE `t` (\n" +
+		"  `id` int NOT NULL,\n" +
+		"  `name` varchar(100)\n" +
+		") ENGINE=InnoDB;\n" +
+		"INSERT INTO `t` VALUES (1,'original');\n"
+
+	a := &staticApplier{rules: map[string]map[string]string{
+		"t": {"name": "O'Brien"},
+	}}
+
+	got := run(t, input, a)
+
+	// The escaped form should appear, not raw '.
+	if !strings.Contains(got, `O\'Brien`) {
+		t.Fatalf("single-quote in replacement should be escaped\ngot: %s", got)
+	}
+}
+
+// TestMultipleTablesIndependent verifies that rules for different tables are
+// applied independently and don't interfere.
+func TestMultipleTablesIndependent(t *testing.T) {
+	input := "CREATE TABLE `users` (\n" +
+		"  `id` int NOT NULL,\n" +
+		"  `email` varchar(100)\n" +
+		") ENGINE=InnoDB;\n" +
+		"CREATE TABLE `orders` (\n" +
+		"  `id` int NOT NULL,\n" +
+		"  `ref` varchar(100)\n" +
+		") ENGINE=InnoDB;\n" +
+		"INSERT INTO `users` VALUES (1,'user@test.com');\n" +
+		"INSERT INTO `orders` VALUES (99,'ORD-001');\n"
+
+	a := &staticApplier{rules: map[string]map[string]string{
+		"users":  {"email": "anon@anon.com"},
+		"orders": {"ref": "REF-ANON"},
+	}}
+
+	got := run(t, input, a)
+
+	if !strings.Contains(got, "'anon@anon.com'") {
+		t.Fatalf("users.email should be replaced\ngot: %s", got)
+	}
+	if !strings.Contains(got, "'REF-ANON'") {
+		t.Fatalf("orders.ref should be replaced\ngot: %s", got)
+	}
+	if strings.Contains(got, "user@test.com") || strings.Contains(got, "ORD-001") {
+		t.Fatalf("original values should be gone\ngot: %s", got)
+	}
+}
