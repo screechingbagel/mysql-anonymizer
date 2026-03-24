@@ -74,7 +74,11 @@ func run() error {
 		if err != nil {
 			return fmt.Errorf("open input: %w", err)
 		}
-		defer f.Close()
+		defer func() {
+			if err := f.Close(); err != nil {
+				fmt.Fprintf(os.Stderr, "close input: %v\n", err)
+			}
+		}()
 		r = f
 	}
 

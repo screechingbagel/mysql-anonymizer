@@ -71,11 +71,11 @@ func (pr *Reader) Total() int64 {
 func (pr *Reader) print(w io.Writer, totalBytes, deltaBytes int64, rhythm time.Duration) {
 	rate := float64(deltaBytes) / rhythm.Seconds()
 	if pr.humanize {
-		fmt.Fprintf(w, "progress: %s read, %s/s\n",
+		_, _ = fmt.Fprintf(w, "progress: %s read, %s/s\n",
 			units.BytesSize(float64(totalBytes)),
 			units.BytesSize(rate),
 		)
 	} else {
-		fmt.Fprintf(w, "progress: %d bytes read, %.0f bytes/s\n", totalBytes, rate)
+		_, _ = fmt.Fprintf(w, "progress: %d bytes read, %.0f bytes/s\n", totalBytes, rate)
 	}
 }
