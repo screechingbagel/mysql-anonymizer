@@ -89,14 +89,16 @@ type parser struct {
 	tables map[string][]string
 
 	// Scratch buffers reused across rows to reduce allocations.
-	cellBuf []byte // raw bytes of a single cell
-	valsBuf []string
+	cellBuf    []byte   // raw bytes of a single cell
+	valsBuf    []string
+	payloadBuf []byte // accumulated INSERT payload, reset per statement
 }
 
 func (p *parser) run() error {
 	p.tables = make(map[string][]string, 32)
 	p.cellBuf = make([]byte, 0, 256)
 	p.valsBuf = make([]string, 0, 64)
+	p.payloadBuf = make([]byte, 0, 4*1024)
 
 	for {
 		line, err := p.br.ReadSlice('\n')
@@ -244,16 +246,13 @@ func (p *parser) parseInsertLine(line []byte) error {
 	// We need to find "VALUES" then the opening "(" of the first row.
 	rest := after0
 
-	// The full VALUES payload may span multiple lines. Read until we see ";\n"
-	// or bare ";" at end of last row.
-	// Accumulate bytes: everything from "VALUES " to end of statement.
-	var payload []byte
-	payload = append(payload, rest...)
+	// Accumulate the full VALUES payload (may span multiple lines) into a
+	// reused scratch buffer to avoid a per-statement heap allocation.
+	p.payloadBuf = append(p.payloadBuf[:0], rest...)
 
-	// Check if current payload already has a terminating semicolon.
-	for !statementTerminated(payload) {
+	for !statementTerminated(p.payloadBuf) {
 		nextLine, err := p.br.ReadBytes('\n')
-		payload = append(payload, nextLine...)
+		p.payloadBuf = append(p.payloadBuf, nextLine...)
 		if err == io.EOF {
 			break
 		}
@@ -261,14 +260,16 @@ func (p *parser) parseInsertLine(line []byte) error {
 			return fmt.Errorf("mysql parser: INSERT read: %w", err)
 		}
 	}
+	payload := p.payloadBuf
 
-	// Write the INSERT INTO `tablename` prefix.
-	prefix := fmt.Sprintf("INSERT INTO `%s` ", tableName)
-	if _, err := p.bw.WriteString(prefix); err != nil {
-		return err
+	// Write: INSERT INTO `tablename` VALUES
+	for _, s := range []string{"INSERT INTO `", tableName, "` VALUES"} {
+		if _, err := p.bw.WriteString(s); err != nil {
+			return err
+		}
 	}
 
-	// Find "VALUES" in the payload.
+	// Find "VALUES" in payload to locate row start position.
 	valStart := bytes.Index(payload, []byte("VALUES"))
 	if valStart < 0 {
 		// Not a VALUES insert (unlikely with mysqldump, but be safe).
@@ -276,17 +277,7 @@ func (p *parser) parseInsertLine(line []byte) error {
 		return err
 	}
 
-	// Write "VALUES" keyword and any space up to the first "(".
-	// Then parse and rewrite rows.
-	if _, err := p.bw.WriteString("VALUES"); err != nil {
-		return err
-	}
-
-	// Cursor: position in payload after "VALUES".
-	pos := valStart + len("VALUES")
-
-	// We need to write everything before the first "(", then rewrite each row.
-	return p.writeRows(tableName, colNames, payload, pos)
+	return p.writeRows(tableName, colNames, payload, valStart+len("VALUES"))
 }
 
 // statementTerminated reports whether the INSERT payload ends with ";".
@@ -515,16 +506,15 @@ func (p *parser) writeRow(vals []string, wasQuoted []bool) error {
 // extractBacktickName extracts the identifier between the first pair of
 // backticks in b. Returns ("", false) if none found.
 func extractBacktickName(b []byte) (string, bool) {
-	_, after, ok := bytes.Cut(b, []byte{'`'})
+	_, mid, ok := bytes.Cut(b, []byte{'`'})
 	if !ok {
 		return "", false
 	}
-	rest := after
-	before, _, ok := bytes.Cut(rest, []byte{'`'})
+	name, _, ok := bytes.Cut(mid, []byte{'`'})
 	if !ok {
 		return "", false
 	}
-	return string(before), true
+	return string(name), true
 }
 
 // writeSQLEscaped writes s to w, escaping backslashes and single quotes

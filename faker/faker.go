@@ -122,7 +122,8 @@ func FuncMap() template.FuncMap {
 
 			// Random strings — sprig-compatible signatures:
 			// {{ randAlphaNum 8 }}  {{ randNumeric 5 }}
-			"randAlphaNum": func(n int) string { return gofakeit.LetterN(uint(n)) },
+			// Password(lower, upper, numeric, special, space, num) gives us alphanumeric.
+			"randAlphaNum": func(n int) string { return gofakeit.Password(true, true, true, false, false, n) },
 			"randNumeric":  func(n int) string { return gofakeit.DigitN(uint(n)) },
 
 			// String manipulation helpers used in config:
