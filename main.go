@@ -120,26 +120,29 @@ func run() error {
 	// ─── Anonymizer ───────────────────────────────────────────────────────────
 	a := anon.New(cfg.Rules)
 
+	// ─── Memory profile ───────────────────────────────────────────────────────
+	if *memProfile != "" {
+		defer func() {
+			f, err := os.Create(*memProfile)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "create memory profile: %v\n", err)
+				return
+			}
+			defer func() {
+				if err := f.Close(); err != nil {
+					fmt.Fprintf(os.Stderr, "close memory profile: %v\n", err)
+				}
+			}()
+			runtime.GC()
+			if err := pprof.WriteHeapProfile(f); err != nil {
+				fmt.Fprintf(os.Stderr, "write memory profile: %v\n", err)
+			}
+		}()
+	}
+
 	// ─── Run ──────────────────────────────────────────────────────────────────
 	if err := mysql.Parse(ctx, r, w, a); err != nil {
 		return fmt.Errorf("parse: %w", err)
-	}
-
-	// ─── Memory profile ───────────────────────────────────────────────────────
-	if *memProfile != "" {
-		f, err := os.Create(*memProfile)
-		if err != nil {
-			return fmt.Errorf("create memory profile: %w", err)
-		}
-		defer func() {
-			if err := f.Close(); err != nil {
-				fmt.Fprintf(os.Stderr, "close memory profile: %v\n", err)
-			}
-		}()
-		runtime.GC()
-		if err := pprof.WriteHeapProfile(f); err != nil {
-			return fmt.Errorf("write memory profile: %w", err)
-		}
 	}
 
 	return nil

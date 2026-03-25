@@ -10,6 +10,12 @@ mysqldump --single-transaction mydb \
   | mysql stagingdb
 ```
 
+**Profiling with both CPU and Memory enabled:**
+
+```bash
+mysqldump ... | data-anonymizer -c config.yaml --cpuprofile cpu.pprof --memprofile mem.pprof | mysql ...
+```
+
 **Flags**
 
 | Flag | Default | Description |
