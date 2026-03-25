@@ -31,9 +31,19 @@
 //
 // # Escape sequences in string cells
 //
-// mysqldump escapes single-quote as \' (backslash-quote) and also as ”
-// (doubled quote). Both are correctly handled during reading. On output,
-// substituted values have ' escaped to \' and \ escaped to \\.
+// On read: mysqldump encodes a literal single-quote inside a string cell as
+// either \' (backslash-quote) or '' (doubled-quote). The parser decodes both
+// forms to the raw character before handing the value to the Applier.
+//
+// On write: when emitting a (potentially transformed) string cell the parser
+// re-encodes using MySQL's standard backslash escaping:
+//
+//	\  → \\
+//	'  → \'
+//
+// This matches the format mysqldump itself produces and is accepted by all
+// MySQL-compatible servers. Note that the doubled-quote form ('') is never
+// emitted on output — only the backslash form is used.
 package mysql
 
 import (
@@ -561,9 +571,15 @@ func extractBacktickName(b []byte) (string, bool) {
 	return string(name), true
 }
 
-// writeSQLEscaped writes s to w, escaping backslashes and single quotes
-// using MySQL's standard escape conventions (\ → \\, ' → \').
-// Unescaped segments are written in bulk to minimise write calls.
+// writeSQLEscaped writes s to w using MySQL's standard backslash-escape
+// conventions for string literals:
+//
+//	\  → \\
+//	'  → \'
+//
+// Any other characters — including NUL bytes and non-ASCII sequences — are
+// written verbatim. Safe (non-escaping) runs are written in a single call to
+// minimise system-call overhead on the hot path.
 func writeSQLEscaped(w *bufio.Writer, s string) error {
 	const needsEscape = `\'`
 

@@ -102,6 +102,23 @@ filters:
         value: "127.0.0.1"
 ```
 
+## Output format
+
+All lines outside `INSERT INTO` statements — DDL, comments, `LOCK TABLES`, etc. — are passed through byte-for-byte.
+
+`INSERT INTO` statements are reconstructed cell-by-cell:
+
+- **Column list preserved.** If the original statement used the named-column form (`INSERT INTO \`t\` (\`a\`,\`b\`) VALUES …`), the column list is re-emitted verbatim. This is the safe form for re-import when the schema may later gain columns.
+- **Quoting style preserved.** Cells that were bare in the input (numbers, `NULL`) are written bare. Cells that were single-quoted are written single-quoted.
+- **String escaping.** Substituted string values are re-encoded using MySQL's backslash-escape convention:
+
+  | Character | Encoded as |
+  |-----------|------------|
+  | `\`       | `\\`       |
+  | `'`       | `\'`       |
+
+  All other characters (including non-ASCII and NUL bytes) are written verbatim. The doubled-quote form (`''`) used by some MySQL clients on input is **never** produced on output — only the backslash form is used.
+
 ## Building
 
 ```bash
