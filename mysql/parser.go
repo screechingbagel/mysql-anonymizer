@@ -266,18 +266,46 @@ func (p *parser) parseInsertLine(line []byte) error {
 	}
 	payload := p.payloadBuf
 
-	// Write: INSERT INTO `tablename` VALUES
-	for _, s := range []string{"INSERT INTO `", tableName, "` VALUES"} {
-		if _, err := p.bw.WriteString(s); err != nil {
-			return err
-		}
-	}
-
 	// Find "VALUES" in payload to locate row start position.
 	valStart := bytes.Index(payload, []byte("VALUES"))
 	if valStart < 0 {
 		// Not a VALUES insert (unlikely with mysqldump, but be safe).
+		// Write: INSERT INTO `tablename`
+		for _, s := range []string{"INSERT INTO `", tableName, "`"} {
+			if _, err := p.bw.WriteString(s); err != nil {
+				return err
+			}
+		}
 		_, err := p.bw.Write(payload)
+		return err
+	}
+
+	// columnList is everything between the closing backtick of the table name
+	// and the VALUES keyword — e.g. " (`id`,`name`,`country`) ".
+	// mysqldump always emits this when --complete-insert is used, and some
+	// versions emit it by default. We must preserve it verbatim so that the
+	// output remains safe to re-import even if the schema later gains columns.
+	columnList := bytes.TrimSpace(payload[:valStart])
+
+	// Write: INSERT INTO `tablename` [columnList ]VALUES
+	if _, err := p.bw.WriteString("INSERT INTO `"); err != nil {
+		return err
+	}
+	if _, err := p.bw.WriteString(tableName); err != nil {
+		return err
+	}
+	if err := p.bw.WriteByte('`'); err != nil {
+		return err
+	}
+	if len(columnList) > 0 {
+		if err := p.bw.WriteByte(' '); err != nil {
+			return err
+		}
+		if _, err := p.bw.Write(columnList); err != nil {
+			return err
+		}
+	}
+	if _, err := p.bw.WriteString(" VALUES"); err != nil {
 		return err
 	}
 
