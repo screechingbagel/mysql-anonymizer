@@ -127,3 +127,27 @@ func BenchmarkParseRow(b *testing.B) {
 		p.parseRow(rowPayload, 1) //nolint:errcheck
 	}
 }
+
+// BenchmarkParseRowEscaped tests parseRow with cells that contain
+// backslash-escaped characters (e.g. URLs, JSON). This is the case
+// that regressed with the two-pass scan.
+func BenchmarkParseRowEscaped(b *testing.B) {
+	cells := make([]string, 10)
+	for i := range cells {
+		// Cell with escapes: simulates JSON-like content with \' and \\
+		cells[i] = fmt.Sprintf("'%s\\\\path\\\\to\\\\'s_thing_%s'",
+			strings.Repeat("a", 12), strings.Repeat("b", 12))
+	}
+	rowPayload := []byte("(" + strings.Join(cells, ",") + ")")
+
+	p := &parser{
+		cellBuf: make([]byte, 0, 256),
+		valsBuf: make([]string, 0, 16),
+	}
+
+	b.SetBytes(int64(len(rowPayload)))
+	b.ResetTimer()
+	for b.Loop() {
+		p.parseRow(rowPayload, 1) //nolint:errcheck
+	}
+}

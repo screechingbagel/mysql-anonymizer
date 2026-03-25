@@ -474,45 +474,56 @@ func (p *parser) parseRow(payload []byte, pos int) (vals []string, wasQuoted []b
 			start := pos
 			escaped := false
 
-			// Single-pass scan: advance pos and, on first escape,
-			// flush the safe prefix into cellBuf then continue decoding.
+			// Loop 1: Fast path (no escapes)
 			for pos < len(payload) {
 				c := payload[pos]
+				// Only trigger escape if there is a next character to be escaped
 				if c == '\\' && pos+1 < len(payload) {
-					if !escaped {
-						escaped = true
-						p.cellBuf = p.cellBuf[:0]
-						p.cellBuf = append(p.cellBuf, payload[start:pos]...)
-					}
-					p.cellBuf = append(p.cellBuf, payload[pos+1])
-					pos += 2
-					continue
+					escaped = true
+					break
 				}
 				if c == '\'' {
 					if pos+1 < len(payload) && payload[pos+1] == '\'' {
-						if !escaped {
-							escaped = true
-							p.cellBuf = p.cellBuf[:0]
-							p.cellBuf = append(p.cellBuf, payload[start:pos]...)
-						}
-						p.cellBuf = append(p.cellBuf, '\'')
-						pos += 2
-						continue
+						escaped = true
+						break
 					}
-					// End of string.
+					// Unescaped closing quote.
 					break
-				}
-				if escaped {
-					p.cellBuf = append(p.cellBuf, c)
 				}
 				pos++
 			}
 
 			if !escaped {
+				// Fast path: no escape sequences — reference payload directly.
 				p.valsBuf = append(p.valsBuf, unsafe.String(&payload[start], pos-start))
 			} else {
+				// Flush the safe prefix to cellBuf.
+				p.cellBuf = p.cellBuf[:0]
+				p.cellBuf = append(p.cellBuf, payload[start:pos]...)
+
+				// Loop 2: Slow path (escape decoding)
+				for pos < len(payload) {
+					c := payload[pos]
+					if c == '\\' && pos+1 < len(payload) {
+						p.cellBuf = append(p.cellBuf, payload[pos+1])
+						pos += 2
+						continue
+					}
+					if c == '\'' {
+						if pos+1 < len(payload) && payload[pos+1] == '\'' {
+							p.cellBuf = append(p.cellBuf, '\'')
+							pos += 2
+							continue
+						}
+						// Unescaped closing quote.
+						break
+					}
+					p.cellBuf = append(p.cellBuf, c)
+					pos++
+				}
 				p.valsBuf = append(p.valsBuf, string(p.cellBuf))
 			}
+
 			if pos < len(payload) {
 				pos++ // consume closing '
 			}
@@ -527,33 +538,19 @@ func (p *parser) parseRow(payload []byte, pos int) (vals []string, wasQuoted []b
 			start := pos
 			escaped := false
 
+			// Loop 1: Fast path (no escapes)
 			for pos < len(payload) {
 				c := payload[pos]
 				if c == '\\' && pos+1 < len(payload) {
-					if !escaped {
-						escaped = true
-						p.cellBuf = p.cellBuf[:0]
-						p.cellBuf = append(p.cellBuf, payload[start:pos]...)
-					}
-					p.cellBuf = append(p.cellBuf, payload[pos+1])
-					pos += 2
-					continue
+					escaped = true
+					break
 				}
 				if c == '\'' {
 					if pos+1 < len(payload) && payload[pos+1] == '\'' {
-						if !escaped {
-							escaped = true
-							p.cellBuf = p.cellBuf[:0]
-							p.cellBuf = append(p.cellBuf, payload[start:pos]...)
-						}
-						p.cellBuf = append(p.cellBuf, '\'')
-						pos += 2
-						continue
+						escaped = true
+						break
 					}
 					break
-				}
-				if escaped {
-					p.cellBuf = append(p.cellBuf, c)
 				}
 				pos++
 			}
@@ -561,8 +558,31 @@ func (p *parser) parseRow(payload []byte, pos int) (vals []string, wasQuoted []b
 			if !escaped {
 				p.valsBuf = append(p.valsBuf, unsafe.String(&payload[start], pos-start))
 			} else {
+				p.cellBuf = p.cellBuf[:0]
+				p.cellBuf = append(p.cellBuf, payload[start:pos]...)
+
+				// Loop 2: Slow path (escape decoding)
+				for pos < len(payload) {
+					c := payload[pos]
+					if c == '\\' && pos+1 < len(payload) {
+						p.cellBuf = append(p.cellBuf, payload[pos+1])
+						pos += 2
+						continue
+					}
+					if c == '\'' {
+						if pos+1 < len(payload) && payload[pos+1] == '\'' {
+							p.cellBuf = append(p.cellBuf, '\'')
+							pos += 2
+							continue
+						}
+						break
+					}
+					p.cellBuf = append(p.cellBuf, c)
+					pos++
+				}
 				p.valsBuf = append(p.valsBuf, string(p.cellBuf))
 			}
+
 			if pos < len(payload) {
 				pos++ // consume closing '
 			}
@@ -592,6 +612,21 @@ func (p *parser) parseRow(payload []byte, pos int) (vals []string, wasQuoted []b
 	}
 
 	return p.valsBuf, p.quotedBuf, p.binaryBuf, pos, fmt.Errorf("mysql parser: unterminated row in payload")
+}
+
+// indexEscapeByteFast returns the index of the first byte in b that needs SQL
+// escaping ('\' or '\''), or -1 if none. This uses bytes.IndexByte internally
+// which is heavily optimized assembly, making it much faster than a manual loop.
+func indexEscapeByteFast(b []byte) int {
+	i1 := bytes.IndexByte(b, '\\')
+	i2 := bytes.IndexByte(b, '\'')
+	if i1 >= 0 {
+		if i2 >= 0 && i2 < i1 {
+			return i2
+		}
+		return i1
+	}
+	return i2
 }
 
 // writeRow writes one transformed row as "(val1,val2,...)" to bw.
