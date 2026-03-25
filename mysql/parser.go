@@ -91,7 +91,8 @@ type parser struct {
 	// Scratch buffers reused across rows to reduce allocations.
 	cellBuf    []byte   // raw bytes of a single cell
 	valsBuf    []string
-	payloadBuf []byte // accumulated INSERT payload, reset per statement
+	payloadBuf []byte   // accumulated INSERT payload, reset per statement
+	quotedBuf  []bool   // parallel wasQuoted flags, reset per row
 }
 
 func (p *parser) run() error {
@@ -99,6 +100,7 @@ func (p *parser) run() error {
 	p.cellBuf = make([]byte, 0, 256)
 	p.valsBuf = make([]string, 0, 64)
 	p.payloadBuf = make([]byte, 0, 4*1024)
+	p.quotedBuf = make([]bool, 0, 64)
 
 	for {
 		line, err := p.br.ReadSlice('\n')
@@ -358,14 +360,14 @@ func (p *parser) writeRows(tableName string, colNames []string, payload []byte, 
 // position in payload (pointing just after the closing ')').
 func (p *parser) parseRow(payload []byte, pos int) (vals []string, wasQuoted []bool, newPos int, err error) {
 	p.valsBuf = p.valsBuf[:0]
-	var quoted []bool
+	p.quotedBuf = p.quotedBuf[:0]
 
 	for pos < len(payload) {
 		ch := payload[pos]
 
 		if ch == ')' {
 			pos++ // consume ')'
-			return p.valsBuf, quoted, pos, nil
+			return p.valsBuf, p.quotedBuf, pos, nil
 		}
 
 		if ch == ',' {
@@ -408,7 +410,7 @@ func (p *parser) parseRow(payload []byte, pos int) (vals []string, wasQuoted []b
 			}
 
 			p.valsBuf = append(p.valsBuf, string(p.cellBuf))
-			quoted = append(quoted, true)
+			p.quotedBuf = append(p.quotedBuf, true)
 			continue
 		}
 
@@ -437,7 +439,7 @@ func (p *parser) parseRow(payload []byte, pos int) (vals []string, wasQuoted []b
 				pos++
 			}
 			p.valsBuf = append(p.valsBuf, string(p.cellBuf))
-			quoted = append(quoted, true)
+			p.quotedBuf = append(p.quotedBuf, true)
 			continue
 		}
 
@@ -453,10 +455,10 @@ func (p *parser) parseRow(payload []byte, pos int) (vals []string, wasQuoted []b
 			pos++
 		}
 		p.valsBuf = append(p.valsBuf, string(bytes.TrimSpace(p.cellBuf)))
-		quoted = append(quoted, false)
+		p.quotedBuf = append(p.quotedBuf, false)
 	}
 
-	return p.valsBuf, quoted, pos, fmt.Errorf("mysql parser: unterminated row in payload")
+	return p.valsBuf, p.quotedBuf, pos, fmt.Errorf("mysql parser: unterminated row in payload")
 }
 
 // writeRow writes one transformed row as "(val1,val2,...)" to bw.
@@ -519,35 +521,38 @@ func extractBacktickName(b []byte) (string, bool) {
 
 // writeSQLEscaped writes s to w, escaping backslashes and single quotes
 // using MySQL's standard escape conventions (\ → \\, ' → \').
+// Unescaped segments are written in bulk to minimise write calls.
 func writeSQLEscaped(w *bufio.Writer, s string) error {
-	// Fast path: if s has nothing to escape, write it directly.
-	if !strings.ContainsAny(s, `\'`) {
+	const needsEscape = `\'`
+
+	// Fast path: nothing to escape.
+	if !strings.ContainsAny(s, needsEscape) {
 		_, err := w.WriteString(s)
 		return err
 	}
 
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		switch c {
-		case '\\':
-			if err := w.WriteByte('\\'); err != nil {
-				return err
-			}
-			if err := w.WriteByte('\\'); err != nil {
-				return err
-			}
-		case '\'':
-			if err := w.WriteByte('\\'); err != nil {
-				return err
-			}
-			if err := w.WriteByte('\''); err != nil {
-				return err
-			}
-		default:
-			if err := w.WriteByte(c); err != nil {
+	// Write runs of safe characters in bulk, one WriteString per run.
+	for len(s) > 0 {
+		i := strings.IndexAny(s, needsEscape)
+		if i < 0 {
+			// Remainder has nothing to escape.
+			_, err := w.WriteString(s)
+			return err
+		}
+		// Write the safe prefix.
+		if i > 0 {
+			if _, err := w.WriteString(s[:i]); err != nil {
 				return err
 			}
 		}
+		// Escape the triggering character.
+		if err := w.WriteByte('\\'); err != nil {
+			return err
+		}
+		if err := w.WriteByte(s[i]); err != nil {
+			return err
+		}
+		s = s[i+1:]
 	}
 	return nil
 }
