@@ -440,10 +440,11 @@ func (p *parser) writeRows(tableName string, colNames []string, payload []byte, 
 //
 // Hot-path allocation strategy:
 //
-//	For cells with no backslash or doubled-quote escapes (the vast majority of
-//	mysqldump output), we take a direct unsafe.String view of the payload
-//	slice — zero copies, zero allocations. The cellBuf copy path is only
-//	triggered when escape decoding is required.
+//	Single-pass lazy copy: scan forward byte-by-byte. While no escape
+//	sequences have been seen, just advance pos (zero work). When the first
+//	escape is encountered, flush the safe prefix into cellBuf in one bulk
+//	copy, then continue decoding into cellBuf for the remainder. At the
+//	end: no escapes → unsafe.String (zero alloc); escapes → string(cellBuf).
 func (p *parser) parseRow(payload []byte, pos int) (vals []string, wasQuoted []bool, wasBinary []bool, newPos int, err error) {
 	p.valsBuf = p.valsBuf[:0]
 	p.quotedBuf = p.quotedBuf[:0]
@@ -473,47 +474,43 @@ func (p *parser) parseRow(payload []byte, pos int) (vals []string, wasQuoted []b
 			start := pos
 			escaped := false
 
-			// First pass: scan for unescaped close-quote.
+			// Single-pass scan: advance pos and, on first escape,
+			// flush the safe prefix into cellBuf then continue decoding.
 			for pos < len(payload) {
 				c := payload[pos]
 				if c == '\\' && pos+1 < len(payload) {
-					escaped = true
+					if !escaped {
+						escaped = true
+						p.cellBuf = p.cellBuf[:0]
+						p.cellBuf = append(p.cellBuf, payload[start:pos]...)
+					}
+					p.cellBuf = append(p.cellBuf, payload[pos+1])
 					pos += 2
 					continue
 				}
 				if c == '\'' {
 					if pos+1 < len(payload) && payload[pos+1] == '\'' {
-						escaped = true
+						if !escaped {
+							escaped = true
+							p.cellBuf = p.cellBuf[:0]
+							p.cellBuf = append(p.cellBuf, payload[start:pos]...)
+						}
+						p.cellBuf = append(p.cellBuf, '\'')
 						pos += 2
 						continue
 					}
 					// End of string.
 					break
 				}
+				if escaped {
+					p.cellBuf = append(p.cellBuf, c)
+				}
 				pos++
 			}
 
 			if !escaped {
-				// Fast path: no escape sequences — reference payload directly.
 				p.valsBuf = append(p.valsBuf, unsafe.String(&payload[start], pos-start))
 			} else {
-				// Slow path: decode escapes into cellBuf.
-				p.cellBuf = p.cellBuf[:0]
-				for i := start; i < pos; {
-					c := payload[i]
-					if c == '\\' && i+1 < pos {
-						p.cellBuf = append(p.cellBuf, payload[i+1])
-						i += 2
-						continue
-					}
-					if c == '\'' && i+1 < pos && payload[i+1] == '\'' {
-						p.cellBuf = append(p.cellBuf, '\'')
-						i += 2
-						continue
-					}
-					p.cellBuf = append(p.cellBuf, c)
-					i++
-				}
 				p.valsBuf = append(p.valsBuf, string(p.cellBuf))
 			}
 			if pos < len(payload) {
@@ -533,17 +530,30 @@ func (p *parser) parseRow(payload []byte, pos int) (vals []string, wasQuoted []b
 			for pos < len(payload) {
 				c := payload[pos]
 				if c == '\\' && pos+1 < len(payload) {
-					escaped = true
+					if !escaped {
+						escaped = true
+						p.cellBuf = p.cellBuf[:0]
+						p.cellBuf = append(p.cellBuf, payload[start:pos]...)
+					}
+					p.cellBuf = append(p.cellBuf, payload[pos+1])
 					pos += 2
 					continue
 				}
 				if c == '\'' {
 					if pos+1 < len(payload) && payload[pos+1] == '\'' {
-						escaped = true
+						if !escaped {
+							escaped = true
+							p.cellBuf = p.cellBuf[:0]
+							p.cellBuf = append(p.cellBuf, payload[start:pos]...)
+						}
+						p.cellBuf = append(p.cellBuf, '\'')
 						pos += 2
 						continue
 					}
 					break
+				}
+				if escaped {
+					p.cellBuf = append(p.cellBuf, c)
 				}
 				pos++
 			}
@@ -551,22 +561,6 @@ func (p *parser) parseRow(payload []byte, pos int) (vals []string, wasQuoted []b
 			if !escaped {
 				p.valsBuf = append(p.valsBuf, unsafe.String(&payload[start], pos-start))
 			} else {
-				p.cellBuf = p.cellBuf[:0]
-				for i := start; i < pos; {
-					c := payload[i]
-					if c == '\\' && i+1 < pos {
-						p.cellBuf = append(p.cellBuf, payload[i+1])
-						i += 2
-						continue
-					}
-					if c == '\'' && i+1 < pos && payload[i+1] == '\'' {
-						p.cellBuf = append(p.cellBuf, '\'')
-						i += 2
-						continue
-					}
-					p.cellBuf = append(p.cellBuf, c)
-					i++
-				}
 				p.valsBuf = append(p.valsBuf, string(p.cellBuf))
 			}
 			if pos < len(payload) {
