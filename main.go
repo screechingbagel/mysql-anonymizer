@@ -14,12 +14,15 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"runtime"
 	"runtime/pprof"
+	"syscall"
 	"time"
 
 	"data-anonymizer/anon"
@@ -43,6 +46,11 @@ func run() error {
 	cpuProfile := flag.String("cpuprofile", "", "Write CPU profile to file")
 	memProfile := flag.String("memprofile", "", "Write memory profile to file")
 	flag.Parse()
+
+	// ─── Context (signal + optional timeout) ──────────────────────────────────
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
 
 	// ─── Profiling ────────────────────────────────────────────────────────────
 	if *cpuProfile != "" {
@@ -113,7 +121,7 @@ func run() error {
 	a := anon.New(cfg.Rules)
 
 	// ─── Run ──────────────────────────────────────────────────────────────────
-	if err := mysql.Parse(r, w, a); err != nil {
+	if err := mysql.Parse(ctx, r, w, a); err != nil {
 		return fmt.Errorf("parse: %w", err)
 	}
 

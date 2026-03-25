@@ -2,6 +2,7 @@ package mysql
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"strings"
@@ -62,7 +63,7 @@ func BenchmarkParserPassthrough(b *testing.B) {
 			b.ResetTimer()
 			for b.Loop() {
 				r := bytes.NewReader(dump)
-				if err := Parse(r, io.Discard, passthroughApplier{}); err != nil {
+				if err := Parse(context.Background(), r, io.Discard, passthroughApplier{}); err != nil {
 					b.Fatal(err)
 				}
 			}
@@ -97,7 +98,7 @@ func BenchmarkParserWithRules(b *testing.B) {
 			b.ResetTimer()
 			for b.Loop() {
 				r := bytes.NewReader(dump)
-				if err := Parse(r, io.Discard, a); err != nil {
+				if err := Parse(context.Background(), r, io.Discard, a); err != nil {
 					b.Fatal(err)
 				}
 			}

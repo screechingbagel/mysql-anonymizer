@@ -49,6 +49,7 @@ package mysql
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"strings"
@@ -72,16 +73,19 @@ const (
 
 // Parse reads a mysqldump stream from r, applies rules via a, and writes
 // the (possibly transformed) dump to w.
-func Parse(r io.Reader, w io.Writer, a Applier) error {
+func Parse(ctx context.Context, r io.Reader, w io.Writer, a Applier) error {
 	br := bufio.NewReaderSize(r, readBufSize)
 	bw := bufio.NewWriterSize(w, writeBufSize)
 
 	p := &parser{
-		br: br,
-		bw: bw,
-		a:  a,
+		ctx: ctx,
+		br:  br,
+		bw:  bw,
+		a:   a,
 	}
 	if err := p.run(); err != nil {
+		// Flush even on cancellation so partial output is written.
+		_ = bw.Flush()
 		return err
 	}
 	return bw.Flush()
@@ -90,9 +94,10 @@ func Parse(r io.Reader, w io.Writer, a Applier) error {
 // ─── Internal parser state ────────────────────────────────────────────────────
 
 type parser struct {
-	br *bufio.Reader
-	bw *bufio.Writer
-	a  Applier
+	ctx context.Context
+	br  *bufio.Reader
+	bw  *bufio.Writer
+	a   Applier
 
 	// Known tables: table name → ordered column names.
 	// Populated from CREATE TABLE statements.
@@ -115,6 +120,9 @@ func (p *parser) run() error {
 	p.binaryBuf = make([]bool, 0, 64)
 
 	for {
+		if err := p.ctx.Err(); err != nil {
+			return err
+		}
 		line, err := p.br.ReadSlice('\n')
 		if err == io.EOF {
 			// Flush any remaining bytes (file may not end with newline).
@@ -335,6 +343,9 @@ func (p *parser) writeRows(tableName string, colNames []string, payload []byte, 
 	first := true
 
 	for pos < len(payload) {
+		if err := p.ctx.Err(); err != nil {
+			return err
+		}
 		ch := payload[pos]
 
 		if ch == ';' {

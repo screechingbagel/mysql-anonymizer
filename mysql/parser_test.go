@@ -2,6 +2,7 @@ package mysql
 
 import (
 	"bytes"
+	"context"
 	"strings"
 	"testing"
 
@@ -48,10 +49,28 @@ func (passthroughApplier) Apply(_ string, _ []string, _ []string) (bool, error) 
 func run(t *testing.T, input string, a Applier) string {
 	t.Helper()
 	var out bytes.Buffer
-	if err := Parse(strings.NewReader(input), &out, a); err != nil {
+	if err := Parse(context.Background(), strings.NewReader(input), &out, a); err != nil {
 		t.Fatalf("Parse error: %v", err)
 	}
 	return out.String()
+}
+
+// TestCancelledContext verifies that an already-cancelled context causes Parse
+// to return immediately without processing input.
+func TestCancelledContext(t *testing.T) {
+	input := "CREATE TABLE `t` (\n" +
+		"  `id` int NOT NULL\n" +
+		") ENGINE=InnoDB;\n" +
+		"INSERT INTO `t` VALUES (1),(2),(3);\n"
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel immediately
+
+	var out bytes.Buffer
+	err := Parse(ctx, strings.NewReader(input), &out, passthroughApplier{})
+	if err != context.Canceled {
+		t.Fatalf("expected context.Canceled, got %v", err)
+	}
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
