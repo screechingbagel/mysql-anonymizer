@@ -198,11 +198,27 @@ func (p *parser) parseCreateTable(firstLine []byte) error {
 	var cols []string
 
 	for {
-		line, err := p.br.ReadBytes('\n')
-		if err == io.EOF && len(line) == 0 {
+		// Use ReadSlice instead of ReadBytes to avoid per-line heap
+		// allocations. ReadSlice returns a view into the reader's internal
+		// buffer — zero copies for typical DDL lines. Falls back to manual
+		// collection only when a line exceeds the buffer (very rare for DDL).
+		line, err := p.br.ReadSlice('\n')
+		if err == bufio.ErrBufferFull {
+			// Line exceeds buffer — collect the full line.
+			full := make([]byte, len(line))
+			copy(full, line)
+			for err == bufio.ErrBufferFull {
+				var rest []byte
+				rest, err = p.br.ReadSlice('\n')
+				full = append(full, rest...)
+			}
+			if err != nil && err != io.EOF {
+				return fmt.Errorf("mysql parser: CREATE TABLE read: %w", err)
+			}
+			line = full
+		} else if err == io.EOF && len(line) == 0 {
 			break
-		}
-		if err != nil && err != io.EOF {
+		} else if err != nil && err != io.EOF {
 			return fmt.Errorf("mysql parser: CREATE TABLE read: %w", err)
 		}
 
@@ -273,8 +289,20 @@ func (p *parser) parseInsertLine(line []byte) error {
 	p.payloadBuf = append(p.payloadBuf[:0], rest...)
 
 	for !statementTerminated(p.payloadBuf) {
-		nextLine, err := p.br.ReadBytes('\n')
-		p.payloadBuf = append(p.payloadBuf, nextLine...)
+		// Use ReadSlice to avoid per-line allocation. The returned slice
+		// is only valid until the next read, but the append below copies
+		// the data into payloadBuf immediately.
+		nextLine, err := p.br.ReadSlice('\n')
+		if err == bufio.ErrBufferFull {
+			// Line exceeds buffer — append what we have and keep reading.
+			p.payloadBuf = append(p.payloadBuf, nextLine...)
+			for err == bufio.ErrBufferFull {
+				nextLine, err = p.br.ReadSlice('\n')
+				p.payloadBuf = append(p.payloadBuf, nextLine...)
+			}
+		} else {
+			p.payloadBuf = append(p.payloadBuf, nextLine...)
+		}
 		if err == io.EOF {
 			break
 		}
