@@ -328,3 +328,49 @@ func TestMultipleTablesIndependent(t *testing.T) {
 		t.Fatalf("original values should be gone\ngot: %s", got)
 	}
 }
+
+// TestNamedColumnListPreserved is a regression test for the bug where the
+// parser stripped the column list from INSERT statements that use the
+// named-column form:
+//
+//	INSERT INTO `t` (`id`, `name`, `country`) VALUES ...
+//
+// Without the fix, the output was:
+//
+//	INSERT INTO `t` VALUES ...
+//
+// which is unsafe to re-import if the schema later gains a column.
+func TestNamedColumnListPreserved(t *testing.T) {
+	input := "CREATE TABLE `sales_persons` (\n" +
+		"  `id` int NOT NULL,\n" +
+		"  `name` varchar(64),\n" +
+		"  `country` varchar(128),\n" +
+		"  PRIMARY KEY (`id`)\n" +
+		") ENGINE=InnoDB DEFAULT CHARSET=utf8;\n" +
+		"INSERT INTO `sales_persons` (`id`, `name`, `country`) VALUES (1,'Alice Smith','Chile'),(2,'Bob Jones','France');\n"
+
+	// Case 1: passthrough — column list must be preserved verbatim.
+	t.Run("passthrough", func(t *testing.T) {
+		got := run(t, input, passthroughApplier{})
+		if !strings.Contains(got, "(`id`, `name`, `country`)") {
+			t.Fatalf("named-column list was stripped from output\ngot: %s", got)
+		}
+	})
+
+	// Case 2: with a replacement rule — column list still present, value changed.
+	t.Run("with_rule", func(t *testing.T) {
+		a := &staticApplier{rules: map[string]map[string]string{
+			"sales_persons": {"name": "REDACTED"},
+		}}
+		got := run(t, input, a)
+		if !strings.Contains(got, "(`id`, `name`, `country`)") {
+			t.Fatalf("named-column list was stripped from output\ngot: %s", got)
+		}
+		if strings.Contains(got, "Alice Smith") || strings.Contains(got, "Bob Jones") {
+			t.Fatalf("original names should be redacted\ngot: %s", got)
+		}
+		if strings.Count(got, "'REDACTED'") != 2 {
+			t.Fatalf("expected 2 REDACTED values\ngot: %s", got)
+		}
+	})
+}
