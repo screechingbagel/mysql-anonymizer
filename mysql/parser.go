@@ -89,10 +89,11 @@ type parser struct {
 	tables map[string][]string
 
 	// Scratch buffers reused across rows to reduce allocations.
-	cellBuf    []byte   // raw bytes of a single cell
+	cellBuf    []byte // raw bytes of a single cell
 	valsBuf    []string
-	payloadBuf []byte   // accumulated INSERT payload, reset per statement
-	quotedBuf  []bool   // parallel wasQuoted flags, reset per row
+	payloadBuf []byte // accumulated INSERT payload, reset per statement
+	quotedBuf  []bool // parallel wasQuoted flags, reset per row
+	binaryBuf  []bool // parallel wasBinary flags (_binary '...'), reset per row
 }
 
 func (p *parser) run() error {
@@ -101,6 +102,7 @@ func (p *parser) run() error {
 	p.valsBuf = make([]string, 0, 64)
 	p.payloadBuf = make([]byte, 0, 4*1024)
 	p.quotedBuf = make([]bool, 0, 64)
+	p.binaryBuf = make([]bool, 0, 64)
 
 	for {
 		line, err := p.br.ReadSlice('\n')
@@ -314,7 +316,7 @@ func (p *parser) writeRows(tableName string, colNames []string, payload []byte, 
 			pos++ // consume '('
 
 			// Parse one row.
-			vals, wasQuoted, newPos, err := p.parseRow(payload, pos)
+			vals, wasQuoted, wasBinary, newPos, err := p.parseRow(payload, pos)
 			if err != nil {
 				return err
 			}
@@ -340,7 +342,7 @@ func (p *parser) writeRows(tableName string, colNames []string, payload []byte, 
 			first = false
 
 			// Write transformed row.
-			if err := p.writeRow(vals, wasQuoted); err != nil {
+			if err := p.writeRow(vals, wasQuoted, wasBinary); err != nil {
 				return err
 			}
 
@@ -358,16 +360,17 @@ func (p *parser) writeRows(tableName string, colNames []string, payload []byte, 
 // opening '(' has been consumed). Returns the cell values, a parallel bool
 // slice indicating which cells were originally single-quoted, and the new
 // position in payload (pointing just after the closing ')').
-func (p *parser) parseRow(payload []byte, pos int) (vals []string, wasQuoted []bool, newPos int, err error) {
+func (p *parser) parseRow(payload []byte, pos int) (vals []string, wasQuoted []bool, wasBinary []bool, newPos int, err error) {
 	p.valsBuf = p.valsBuf[:0]
 	p.quotedBuf = p.quotedBuf[:0]
+	p.binaryBuf = p.binaryBuf[:0]
 
 	for pos < len(payload) {
 		ch := payload[pos]
 
 		if ch == ')' {
 			pos++ // consume ')'
-			return p.valsBuf, p.quotedBuf, pos, nil
+			return p.valsBuf, p.quotedBuf, p.binaryBuf, pos, nil
 		}
 
 		if ch == ',' {
@@ -411,6 +414,7 @@ func (p *parser) parseRow(payload []byte, pos int) (vals []string, wasQuoted []b
 
 			p.valsBuf = append(p.valsBuf, string(p.cellBuf))
 			p.quotedBuf = append(p.quotedBuf, true)
+			p.binaryBuf = append(p.binaryBuf, false)
 			continue
 		}
 
@@ -440,6 +444,7 @@ func (p *parser) parseRow(payload []byte, pos int) (vals []string, wasQuoted []b
 			}
 			p.valsBuf = append(p.valsBuf, string(p.cellBuf))
 			p.quotedBuf = append(p.quotedBuf, true)
+			p.binaryBuf = append(p.binaryBuf, true) // preserve _binary prefix on output
 			continue
 		}
 
@@ -456,13 +461,16 @@ func (p *parser) parseRow(payload []byte, pos int) (vals []string, wasQuoted []b
 		}
 		p.valsBuf = append(p.valsBuf, string(bytes.TrimSpace(p.cellBuf)))
 		p.quotedBuf = append(p.quotedBuf, false)
+		p.binaryBuf = append(p.binaryBuf, false)
 	}
 
-	return p.valsBuf, p.quotedBuf, pos, fmt.Errorf("mysql parser: unterminated row in payload")
+	return p.valsBuf, p.quotedBuf, p.binaryBuf, pos, fmt.Errorf("mysql parser: unterminated row in payload")
 }
 
 // writeRow writes one transformed row as "(val1,val2,...)" to bw.
-func (p *parser) writeRow(vals []string, wasQuoted []bool) error {
+// wasBinary[i] true means the original cell had a _binary '...' prefix which
+// must be re-emitted so MySQL correctly handles binary column values.
+func (p *parser) writeRow(vals []string, wasQuoted []bool, wasBinary []bool) error {
 	if err := p.bw.WriteByte('('); err != nil {
 		return err
 	}
@@ -482,6 +490,12 @@ func (p *parser) writeRow(vals []string, wasQuoted []bool) error {
 		}
 
 		if wasQuoted[i] {
+			// Re-emit _binary prefix if present in the original.
+			if i < len(wasBinary) && wasBinary[i] {
+				if _, err := p.bw.WriteString("_binary "); err != nil {
+					return err
+				}
+			}
 			// Escape the value and wrap in single quotes.
 			if err := p.bw.WriteByte('\''); err != nil {
 				return err
