@@ -13,6 +13,8 @@ import (
 type Anon struct {
 	// rules: table → column → compiled template
 	rules map[string]map[string]*template.Template
+	// buf is reused across Apply calls (pipeline is single-goroutine).
+	buf bytes.Buffer
 }
 
 // New creates an Anon from a pre-compiled rules map (as produced by config.Load).
@@ -36,19 +38,18 @@ func (a *Anon) Apply(table string, colNames []string, vals []string) (drop bool,
 		return false, nil // no rules for this table — full pass-through
 	}
 
-	var buf bytes.Buffer
 	for i, col := range colNames {
 		tpl, ok := tableRules[col]
 		if !ok {
 			continue // no rule for this column — keep original value
 		}
 
-		buf.Reset()
-		if err := tpl.Execute(&buf, nil); err != nil {
+		a.buf.Reset()
+		if err := tpl.Execute(&a.buf, nil); err != nil {
 			return false, fmt.Errorf("anon: execute rule for %s.%s: %w", table, col, err)
 		}
 
-		result := buf.String()
+		result := a.buf.String()
 		switch result {
 		case faker.SentinelDROP:
 			return true, nil
