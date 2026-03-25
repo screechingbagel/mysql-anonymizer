@@ -52,6 +52,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"unsafe"
 
 	"data-anonymizer/faker"
 )
@@ -408,6 +409,13 @@ func (p *parser) writeRows(tableName string, colNames []string, payload []byte, 
 // opening '(' has been consumed). Returns the cell values, a parallel bool
 // slice indicating which cells were originally single-quoted, and the new
 // position in payload (pointing just after the closing ')').
+//
+// Hot-path allocation strategy:
+//
+//	For cells with no backslash or doubled-quote escapes (the vast majority of
+//	mysqldump output), we take a direct unsafe.String view of the payload
+//	slice — zero copies, zero allocations. The cellBuf copy path is only
+//	triggered when escape decoding is required.
 func (p *parser) parseRow(payload []byte, pos int) (vals []string, wasQuoted []bool, wasBinary []bool, newPos int, err error) {
 	p.valsBuf = p.valsBuf[:0]
 	p.quotedBuf = p.quotedBuf[:0]
@@ -434,33 +442,55 @@ func (p *parser) parseRow(payload []byte, pos int) (vals []string, wasQuoted []b
 		// String cell: starts with '
 		if ch == '\'' {
 			pos++ // consume opening '
-			p.cellBuf = p.cellBuf[:0]
+			start := pos
+			escaped := false
 
+			// First pass: scan for unescaped close-quote.
 			for pos < len(payload) {
 				c := payload[pos]
 				if c == '\\' && pos+1 < len(payload) {
-					// Backslash escape: decode to actual character.
-					p.cellBuf = append(p.cellBuf, payload[pos+1])
+					escaped = true
 					pos += 2
 					continue
 				}
 				if c == '\'' {
-					// Could be '' (escaped quote) or end of string.
 					if pos+1 < len(payload) && payload[pos+1] == '\'' {
-						// '' → single '
-						p.cellBuf = append(p.cellBuf, '\'')
+						escaped = true
 						pos += 2
 						continue
 					}
 					// End of string.
-					pos++ // consume closing '
 					break
 				}
-				p.cellBuf = append(p.cellBuf, c)
 				pos++
 			}
 
-			p.valsBuf = append(p.valsBuf, string(p.cellBuf))
+			if !escaped {
+				// Fast path: no escape sequences — reference payload directly.
+				p.valsBuf = append(p.valsBuf, unsafe.String(&payload[start], pos-start))
+			} else {
+				// Slow path: decode escapes into cellBuf.
+				p.cellBuf = p.cellBuf[:0]
+				for i := start; i < pos; {
+					c := payload[i]
+					if c == '\\' && i+1 < pos {
+						p.cellBuf = append(p.cellBuf, payload[i+1])
+						i += 2
+						continue
+					}
+					if c == '\'' && i+1 < pos && payload[i+1] == '\'' {
+						p.cellBuf = append(p.cellBuf, '\'')
+						i += 2
+						continue
+					}
+					p.cellBuf = append(p.cellBuf, c)
+					i++
+				}
+				p.valsBuf = append(p.valsBuf, string(p.cellBuf))
+			}
+			if pos < len(payload) {
+				pos++ // consume closing '
+			}
 			p.quotedBuf = append(p.quotedBuf, true)
 			p.binaryBuf = append(p.binaryBuf, false)
 			continue
@@ -469,28 +499,51 @@ func (p *parser) parseRow(payload []byte, pos int) (vals []string, wasQuoted []b
 		// Binary string: _binary '...'
 		if bytes.HasPrefix(payload[pos:], []byte("_binary '")) {
 			pos += len("_binary '")
-			p.cellBuf = p.cellBuf[:0]
+			start := pos
+			escaped := false
 
 			for pos < len(payload) {
 				c := payload[pos]
 				if c == '\\' && pos+1 < len(payload) {
-					p.cellBuf = append(p.cellBuf, payload[pos+1])
+					escaped = true
 					pos += 2
 					continue
 				}
 				if c == '\'' {
 					if pos+1 < len(payload) && payload[pos+1] == '\'' {
-						p.cellBuf = append(p.cellBuf, '\'')
+						escaped = true
 						pos += 2
 						continue
 					}
-					pos++ // consume closing '
 					break
 				}
-				p.cellBuf = append(p.cellBuf, c)
 				pos++
 			}
-			p.valsBuf = append(p.valsBuf, string(p.cellBuf))
+
+			if !escaped {
+				p.valsBuf = append(p.valsBuf, unsafe.String(&payload[start], pos-start))
+			} else {
+				p.cellBuf = p.cellBuf[:0]
+				for i := start; i < pos; {
+					c := payload[i]
+					if c == '\\' && i+1 < pos {
+						p.cellBuf = append(p.cellBuf, payload[i+1])
+						i += 2
+						continue
+					}
+					if c == '\'' && i+1 < pos && payload[i+1] == '\'' {
+						p.cellBuf = append(p.cellBuf, '\'')
+						i += 2
+						continue
+					}
+					p.cellBuf = append(p.cellBuf, c)
+					i++
+				}
+				p.valsBuf = append(p.valsBuf, string(p.cellBuf))
+			}
+			if pos < len(payload) {
+				pos++ // consume closing '
+			}
 			p.quotedBuf = append(p.quotedBuf, true)
 			p.binaryBuf = append(p.binaryBuf, true) // preserve _binary prefix on output
 			continue
@@ -498,16 +551,20 @@ func (p *parser) parseRow(payload []byte, pos int) (vals []string, wasQuoted []b
 
 		// Bare cell: NULL, numeric, bit literal, hex literal, etc.
 		// Read until next ',' or ')'.
-		p.cellBuf = p.cellBuf[:0]
+		start := pos
 		for pos < len(payload) {
 			c := payload[pos]
 			if c == ',' || c == ')' || c == '\r' || c == '\n' {
 				break
 			}
-			p.cellBuf = append(p.cellBuf, c)
 			pos++
 		}
-		p.valsBuf = append(p.valsBuf, string(bytes.TrimSpace(p.cellBuf)))
+		// Trim trailing spaces inline to avoid bytes.TrimSpace allocation.
+		end := pos
+		for end > start && payload[end-1] == ' ' {
+			end--
+		}
+		p.valsBuf = append(p.valsBuf, unsafe.String(&payload[start], end-start))
 		p.quotedBuf = append(p.quotedBuf, false)
 		p.binaryBuf = append(p.binaryBuf, false)
 	}
