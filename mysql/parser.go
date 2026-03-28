@@ -301,16 +301,23 @@ func (p *parser) parseInsertLine(line []byte) error {
 
 	updateState(rest)
 
-	for !statementTerminated(p.payloadBuf, inString) { // Pass state so we don't truncate mid-string
+	truncated := false
+	for !statementTerminated(p.payloadBuf, inString) {
 		nextLine, err := p.br.ReadBytes('\n')
 		p.payloadBuf = append(p.payloadBuf, nextLine...)
 		updateState(nextLine)
 		if err == io.EOF {
+			truncated = true
 			break
 		}
 		if err != nil {
 			return fmt.Errorf("mysql parser: INSERT read: %w", err)
 		}
+	}
+	if truncated {
+		// The upstream writer (e.g. mysqldump) was killed mid-statement.
+		// The partial payload is unrecoverable; discard it and return cleanly.
+		return nil
 	}
 	payload := p.payloadBuf
 
@@ -360,9 +367,9 @@ func (p *parser) parseInsertLine(line []byte) error {
 	return p.writeRows(tableName, colNames, payload, valStart+len("VALUES"))
 }
 
-// statementTerminated reports whether the INSERT payload ends with ";".
-// We need to handle the trailing "\n" that follows on mysqldump output.
-// inString tracks whether the end of the payload is currently inside a quoted string.
+// statementTerminated reports whether the INSERT payload ends with a bare ";"
+// (i.e. not inside a string literal). We need to handle the trailing "\n" that
+// follows on mysqldump output. inString must be kept in sync by the caller.
 func statementTerminated(b []byte, inString bool) bool {
 	if inString {
 		return false
