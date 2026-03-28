@@ -52,7 +52,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"strings"
 
 	"data-anonymizer/faker"
 )
@@ -633,17 +632,9 @@ func extractBacktickName(b []byte) (string, bool) {
 // written verbatim. Safe (non-escaping) runs are written in a single call to
 // minimise system-call overhead on the hot path.
 func writeSQLEscaped(w *bufio.Writer, s string) error {
-	const needsEscape = `\'`
-
-	// Fast path: nothing to escape.
-	if !strings.ContainsAny(s, needsEscape) {
-		_, err := w.WriteString(s)
-		return err
-	}
-
 	// Write runs of safe characters in bulk, one WriteString per run.
 	for len(s) > 0 {
-		i := strings.IndexAny(s, needsEscape)
+		i := indexEscapeByte(s)
 		if i < 0 {
 			// Remainder has nothing to escape.
 			_, err := w.WriteString(s)
@@ -665,4 +656,17 @@ func writeSQLEscaped(w *bufio.Writer, s string) error {
 		s = s[i+1:]
 	}
 	return nil
+}
+
+// indexEscapeByte returns the index of the first byte in s that needs SQL
+// escaping ('\\' or '\''), or -1 if none. This is a hot-path replacement
+// for strings.IndexAny(s, `\\'`) that avoids the per-call ASCII-set
+// construction overhead.
+func indexEscapeByte(s string) int {
+	for i := range len(s) {
+		if s[i] == '\\' || s[i] == '\'' {
+			return i
+		}
+	}
+	return -1
 }
