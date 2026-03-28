@@ -32,7 +32,7 @@
 // # Escape sequences in string cells
 //
 // On read: mysqldump encodes a literal single-quote inside a string cell as
-// either \' (backslash-quote) or '' (doubled-quote). The parser decodes both
+// either \' (backslash-quote) or ” (doubled-quote). The parser decodes both
 // forms to the raw character before handing the value to the Applier.
 //
 // On write: when emitting a (potentially transformed) string cell the parser
@@ -42,7 +42,7 @@
 //	'  → \'
 //
 // This matches the format mysqldump itself produces and is accepted by all
-// MySQL-compatible servers. Note that the doubled-quote form ('') is never
+// MySQL-compatible servers. Note that the doubled-quote form (”) is never
 // emitted on output — only the backslash form is used.
 package mysql
 
@@ -272,9 +272,39 @@ func (p *parser) parseInsertLine(line []byte) error {
 	// reused scratch buffer to avoid a per-statement heap allocation.
 	p.payloadBuf = append(p.payloadBuf[:0], rest...)
 
-	for !statementTerminated(p.payloadBuf) {
+	// We must track string quoting so that we don't incorrectly interpret a
+	// semicolon inside a string literal as the end of the statement.
+	inString := false
+	inIdentifier := false
+	escapeNext := false
+
+	updateState := func(b []byte) {
+		for _, c := range b {
+			if escapeNext {
+				escapeNext = false
+				continue
+			}
+			switch c {
+			case '\\':
+				escapeNext = true // Only escapes inside strings usually, but safe to track globally
+			case '\'':
+				if !inIdentifier {
+					inString = !inString
+				}
+			case '`':
+				if !inString {
+					inIdentifier = !inIdentifier
+				}
+			}
+		}
+	}
+
+	updateState(rest)
+
+	for !statementTerminated(p.payloadBuf, inString) { // Pass state so we don't truncate mid-string
 		nextLine, err := p.br.ReadBytes('\n')
 		p.payloadBuf = append(p.payloadBuf, nextLine...)
+		updateState(nextLine)
 		if err == io.EOF {
 			break
 		}
@@ -332,7 +362,11 @@ func (p *parser) parseInsertLine(line []byte) error {
 
 // statementTerminated reports whether the INSERT payload ends with ";".
 // We need to handle the trailing "\n" that follows on mysqldump output.
-func statementTerminated(b []byte) bool {
+// inString tracks whether the end of the payload is currently inside a quoted string.
+func statementTerminated(b []byte, inString bool) bool {
+	if inString {
+		return false
+	}
 	t := bytes.TrimRight(b, " \t\r\n")
 	return len(t) > 0 && t[len(t)-1] == ';'
 }

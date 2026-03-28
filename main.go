@@ -51,7 +51,6 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-
 	// ─── Profiling ────────────────────────────────────────────────────────────
 	if *cpuProfile != "" {
 		f, err := os.Create(*cpuProfile)
