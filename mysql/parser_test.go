@@ -414,3 +414,57 @@ func TestUnterminatedRowRegression(t *testing.T) {
 		t.Fatalf("expected subsequent row to remain uncorrupted\ngot: %s", got)
 	}
 }
+
+// TestTruncatedStreamDiscarded verifies that a stream truncated mid-INSERT
+// (e.g. mysqldump killed by timeout) does not produce an error. The partial
+// statement is silently discarded; complete statements before it are preserved.
+func TestTruncatedStreamDiscarded(t *testing.T) {
+	// Three cases of truncation mid-INSERT:
+	// 1. truncated mid-string-cell (no closing quote, no semicolon)
+	// 2. truncated mid-bare-cell
+	// 3. truncated after the opening '(' of a row
+	cases := []struct {
+		name  string
+		input string
+	}{
+		{
+			name: "mid_string_cell",
+			input: "CREATE TABLE `t` (\n" +
+				"  `id` int NOT NULL,\n" +
+				"  `note` text\n" +
+				") ENGINE=InnoDB;\n" +
+				"INSERT INTO `t` VALUES (1,'complete');\n" +
+				"INSERT INTO `t` VALUES (2,'truncated mid-str", // no closing quote or semicolon
+		},
+		{
+			name: "mid_bare_cell",
+			input: "CREATE TABLE `t` (\n" +
+				"  `id` int NOT NULL\n" +
+				") ENGINE=InnoDB;\n" +
+				"INSERT INTO `t` VALUES (1);\n" +
+				"INSERT INTO `t` VALUES (99", // no closing paren or semicolon
+		},
+		{
+			name: "after_opening_paren",
+			input: "CREATE TABLE `t` (\n" +
+				"  `id` int NOT NULL\n" +
+				") ENGINE=InnoDB;\n" +
+				"INSERT INTO `t` VALUES (1);\n" +
+				"INSERT INTO `t` VALUES (", // cut immediately after '('
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var out bytes.Buffer
+			err := Parse(context.Background(), strings.NewReader(tc.input), &out, passthroughApplier{})
+			if err != nil {
+				t.Fatalf("expected no error on truncated stream, got: %v", err)
+			}
+			// The complete INSERT before the truncated one must still be present.
+			if !strings.Contains(out.String(), "(1,") && !strings.Contains(out.String(), "(1)") {
+				t.Fatalf("complete row before truncated INSERT should be in output\ngot: %s", out.String())
+			}
+		})
+	}
+}
