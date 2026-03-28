@@ -393,3 +393,24 @@ func TestNamedColumnListPreserved(t *testing.T) {
 		}
 	})
 }
+
+// TestUnterminatedRowRegression verifies that a string value containing a semicolon
+// at the end of a physical line (and spanning multiple lines) does not prematurely
+// terminate the parser's statement read loop.
+func TestUnterminatedRowRegression(t *testing.T) {
+	input := "CREATE TABLE `t` (\n" +
+		"  `id` int NOT NULL,\n" +
+		"  `note` text\n" +
+		") ENGINE=InnoDB;\n" +
+		"INSERT INTO `t` VALUES (1,'this string ends with a semicolon;\n" +
+		"but continues on the next line'),(2,'normal');\n"
+
+	got := run(t, input, passthroughApplier{})
+
+	if !strings.Contains(got, "this string ends with a semicolon;\nbut continues") {
+		t.Fatalf("expected string containing semicolon and newline to survive\ngot: %s", got)
+	}
+	if !strings.Contains(got, "(2,'normal')") {
+		t.Fatalf("expected subsequent row to remain uncorrupted\ngot: %s", got)
+	}
+}
