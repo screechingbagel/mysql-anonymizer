@@ -468,3 +468,32 @@ func TestTruncatedStreamDiscarded(t *testing.T) {
 		})
 	}
 }
+
+// TestUnquotedValueReplacementBug verifies a known bug where an unquoted original value
+// (like an integer or NULL) replaced by a string value is emitted without quotes,
+// resulting in invalid SQL.
+func TestUnquotedValueReplacementBug(t *testing.T) {
+	input := "CREATE TABLE `t` (\n" +
+		"  `id` int NOT NULL,\n" +
+		"  `num` int,\n" +
+		"  `opt` varchar(100)\n" +
+		") ENGINE=InnoDB;\n" +
+		"INSERT INTO `t` VALUES (1,999,NULL);\n"
+
+	a := &staticApplier{rules: map[string]map[string]string{
+		"t": {
+			"num": "Lorem Ipsum",
+			"opt": "Replacement String",
+		},
+	}}
+
+	got := run(t, input, a)
+
+	// Since they are strings, we expect them to be wrapped in single quotes in the output.
+	if !strings.Contains(got, "'Lorem Ipsum'") {
+		t.Errorf("bug: unquoted integer replacement string is missing quotes.\ngot: %s", got)
+	}
+	if !strings.Contains(got, "'Replacement String'") {
+		t.Errorf("bug: unquoted NULL replacement string is missing quotes.\ngot: %s", got)
+	}
+}
