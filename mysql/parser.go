@@ -56,11 +56,19 @@ import (
 	"data-anonymizer/faker"
 )
 
+// Cell represents a single parsed SQL value and keeps track of whether it
+// was originally enclosed in single quotes or marked as binary.
+type Cell struct {
+	Value    string
+	Quoted   bool
+	IsBinary bool
+}
+
 // Applier is implemented by anon.Anon.
 type Applier interface {
-	// Apply transforms vals in-place for the given table.
+	// Apply transforms cells in-place for the given table.
 	// Returns drop=true if the row should be omitted from output.
-	Apply(table string, colNames []string, vals []string) (drop bool, err error)
+	Apply(table string, colNames []string, cells []Cell) (drop bool, err error)
 }
 
 // ─── Parser ───────────────────────────────────────────────────────────────────
@@ -104,19 +112,15 @@ type parser struct {
 
 	// Scratch buffers reused across rows to reduce allocations.
 	cellBuf    []byte // raw bytes of a single cell
-	valsBuf    []string
+	cellsBuf   []Cell
 	payloadBuf []byte // accumulated INSERT payload, reset per statement
-	quotedBuf  []bool // parallel wasQuoted flags, reset per row
-	binaryBuf  []bool // parallel wasBinary flags (_binary '...'), reset per row
 }
 
 func (p *parser) run() error {
 	p.tables = make(map[string][]string, 32)
 	p.cellBuf = make([]byte, 0, 256)
-	p.valsBuf = make([]string, 0, 64)
+	p.cellsBuf = make([]Cell, 0, 64)
 	p.payloadBuf = make([]byte, 0, 4*1024)
-	p.quotedBuf = make([]bool, 0, 64)
-	p.binaryBuf = make([]bool, 0, 64)
 
 	for {
 		if err := p.ctx.Err(); err != nil {
@@ -402,17 +406,15 @@ func (p *parser) writeRows(tableName string, colNames []string, payload []byte, 
 		}
 
 		if ch == '(' {
-			pos++ // consume '('
-
 			// Parse one row.
-			vals, wasQuoted, wasBinary, newPos, err := p.parseRow(payload, pos)
+			cells, newPos, err := p.parseRow(payload, pos)
 			if err != nil {
-				return err
+				return fmt.Errorf("row parse err at pos %d: %w", pos, err)
 			}
 			pos = newPos
 
 			// Apply anonymization rules.
-			drop, err := p.a.Apply(tableName, colNames, vals)
+			drop, err := p.a.Apply(tableName, colNames, cells)
 			if err != nil {
 				return fmt.Errorf("mysql parser: apply rules for %s: %w", tableName, err)
 			}
@@ -431,8 +433,8 @@ func (p *parser) writeRows(tableName string, colNames []string, payload []byte, 
 			first = false
 
 			// Write transformed row.
-			if err := p.writeRow(vals, wasQuoted, wasBinary); err != nil {
-				return err
+			if err := p.writeRow(cells); err != nil {
+				return fmt.Errorf("write row: %w", err)
 			}
 
 			continue
@@ -445,35 +447,27 @@ func (p *parser) writeRows(tableName string, colNames []string, payload []byte, 
 	return nil
 }
 
-// parseRow parses the cell values of one tuple starting at pos (after the
-// opening '(' has been consumed). Returns the cell values, a parallel bool
-// slice indicating which cells were originally single-quoted, and the new
-// position in payload (pointing just after the closing ')').
-func (p *parser) parseRow(payload []byte, pos int) (vals []string, wasQuoted []bool, wasBinary []bool, newPos int, err error) {
-	p.valsBuf = p.valsBuf[:0]
-	p.quotedBuf = p.quotedBuf[:0]
-	p.binaryBuf = p.binaryBuf[:0]
+// parseRow parses a single row of cells inside a VALUES (...) block.
+func (p *parser) parseRow(payload []byte, pos int) (cells []Cell, newPos int, err error) {
+	if payload[pos] != '(' {
+		return nil, pos, fmt.Errorf("expected '(' at start of row, got %q", payload[pos])
+	}
+	p.cellsBuf = p.cellsBuf[:0]
+	pos++
 
 	for pos < len(payload) {
-		ch := payload[pos]
-
-		if ch == ')' {
+		if payload[pos] == ')' {
 			pos++ // consume ')'
-			return p.valsBuf, p.quotedBuf, p.binaryBuf, pos, nil
+			return p.cellsBuf, pos, nil
 		}
 
-		if ch == ',' {
+		if payload[pos] == ',' || payload[pos] == ' ' || payload[pos] == '\t' || payload[pos] == '\r' || payload[pos] == '\n' {
 			pos++ // separator between cells
 			continue
 		}
 
-		if ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n' {
-			pos++
-			continue
-		}
-
 		// String cell: starts with '
-		if ch == '\'' {
+		if payload[pos] == '\'' {
 			pos++ // consume opening '
 			p.cellBuf = p.cellBuf[:0]
 
@@ -501,9 +495,7 @@ func (p *parser) parseRow(payload []byte, pos int) (vals []string, wasQuoted []b
 				pos++
 			}
 
-			p.valsBuf = append(p.valsBuf, string(p.cellBuf))
-			p.quotedBuf = append(p.quotedBuf, true)
-			p.binaryBuf = append(p.binaryBuf, false)
+			p.cellsBuf = append(p.cellsBuf, Cell{Value: string(p.cellBuf), Quoted: true, IsBinary: false})
 			continue
 		}
 
@@ -531,9 +523,7 @@ func (p *parser) parseRow(payload []byte, pos int) (vals []string, wasQuoted []b
 				p.cellBuf = append(p.cellBuf, c)
 				pos++
 			}
-			p.valsBuf = append(p.valsBuf, string(p.cellBuf))
-			p.quotedBuf = append(p.quotedBuf, true)
-			p.binaryBuf = append(p.binaryBuf, true) // preserve _binary prefix on output
+			p.cellsBuf = append(p.cellsBuf, Cell{Value: string(p.cellBuf), Quoted: true, IsBinary: true})
 			continue
 		}
 
@@ -545,42 +535,39 @@ func (p *parser) parseRow(payload []byte, pos int) (vals []string, wasQuoted []b
 			if c == ',' || c == ')' || c == '\r' || c == '\n' {
 				break
 			}
-			p.cellBuf = append(p.cellBuf, c)
+			p.cellBuf = append(p.cellBuf, payload[pos])
 			pos++
 		}
-		p.valsBuf = append(p.valsBuf, string(bytes.TrimSpace(p.cellBuf)))
-		p.quotedBuf = append(p.quotedBuf, false)
-		p.binaryBuf = append(p.binaryBuf, false)
+		p.cellsBuf = append(p.cellsBuf, Cell{Value: string(bytes.TrimSpace(p.cellBuf)), Quoted: false})
 	}
 
-	return p.valsBuf, p.quotedBuf, p.binaryBuf, pos, fmt.Errorf("mysql parser: unterminated row in payload")
+	return p.cellsBuf, pos, fmt.Errorf("mysql parser: unterminated row in payload")
 }
 
-// writeRow writes one transformed row as "(val1,val2,...)" to bw.
-// wasBinary[i] true means the original cell had a _binary '...' prefix which
-// must be re-emitted so MySQL correctly handles binary column values.
-func (p *parser) writeRow(vals []string, wasQuoted []bool, wasBinary []bool) error {
+// writeRow outputs a single set of matched cells representing a VALUES row.
+func (p *parser) writeRow(cells []Cell) error {
 	if err := p.bw.WriteByte('('); err != nil {
 		return err
 	}
 
-	for i, v := range vals {
+	for i, c := range cells {
 		if i > 0 {
 			if err := p.bw.WriteByte(','); err != nil {
 				return err
 			}
 		}
 
-		if v == faker.SentinelNULL {
+		if c.Value == faker.SentinelNULL {
 			if _, err := p.bw.WriteString("NULL"); err != nil {
 				return err
 			}
 			continue
 		}
 
-		if wasQuoted[i] {
+		// If the cell was originally quoted or generated by an anonymizer using a string template, quote it safely
+		if c.Quoted {
 			// Re-emit _binary prefix if present in the original.
-			if i < len(wasBinary) && wasBinary[i] {
+			if c.IsBinary {
 				if _, err := p.bw.WriteString("_binary "); err != nil {
 					return err
 				}
@@ -589,7 +576,7 @@ func (p *parser) writeRow(vals []string, wasQuoted []bool, wasBinary []bool) err
 			if err := p.bw.WriteByte('\''); err != nil {
 				return err
 			}
-			if err := writeSQLEscaped(p.bw, v); err != nil {
+			if err := writeSQLEscaped(p.bw, c.Value); err != nil {
 				return err
 			}
 			if err := p.bw.WriteByte('\''); err != nil {
@@ -597,7 +584,7 @@ func (p *parser) writeRow(vals []string, wasQuoted []bool, wasBinary []bool) err
 			}
 		} else {
 			// Bare value (numeric, NULL was handled above).
-			if _, err := p.bw.WriteString(v); err != nil {
+			if _, err := p.bw.WriteString(c.Value); err != nil {
 				return err
 			}
 		}
@@ -659,7 +646,7 @@ func writeSQLEscaped(w *bufio.Writer, s string) error {
 }
 
 // indexEscapeByte returns the index of the first byte in s that needs SQL
-// escaping ('\\' or '\''), or -1 if none. This is a hot-path replacement
+// escaping ('\\' or '\”), or -1 if none. This is a hot-path replacement
 // for strings.IndexAny(s, `\\'`) that avoids the per-call ASCII-set
 // construction overhead.
 func indexEscapeByte(s string) int {

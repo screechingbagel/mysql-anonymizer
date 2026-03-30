@@ -4,9 +4,11 @@
 // the full parser+anonymizer pipeline. They cover every template pattern used:
 // faker functions, static strings, {{ null }}, {{ uuidv4 }}, and piped
 // transforms such as {{ randAlphaNum 10 | upper }}.
-package mysql
+package mysql_test
 
 import (
+	"bytes"
+	"context"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -14,9 +16,30 @@ import (
 
 	"data-anonymizer/anon"
 	"data-anonymizer/config"
+	"data-anonymizer/mysql"
 )
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
+
+// mustNotContain fails t if output contains any of the given forbidden strings.
+func mustNotContain(t *testing.T, output string, forbidden ...string) {
+	t.Helper()
+	for _, f := range forbidden {
+		if strings.Contains(output, f) {
+			t.Errorf("leakage: output contains forbidden value %q\noutput:\n%s", f, output)
+		}
+	}
+}
+
+// mustContain fails t if output is missing any of the given required strings.
+func mustContain(t *testing.T, output string, required ...string) {
+	t.Helper()
+	for _, r := range required {
+		if !strings.Contains(output, r) {
+			t.Errorf("missing expected value %q in output:\n%s", r, output)
+		}
+	}
+}
 
 // loadTestAnon loads testdata/integration.conf and
 // returns an *anon.Anon built from it. Fails the test on any error.
@@ -70,7 +93,12 @@ func singleRowInsert(table string, vals ...string) string {
 // runWithTestConfig parses input using the committed testdata/integration.conf.
 func runWithTestConfig(t *testing.T, input string) string {
 	t.Helper()
-	return run(t, input, loadTestAnon(t))
+	a := loadTestAnon(t)
+	var out bytes.Buffer
+	if err := mysql.Parse(context.Background(), strings.NewReader(input), &out, a); err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+	return out.String()
 }
 
 // ─── Integration tests ────────────────────────────────────────────────────────

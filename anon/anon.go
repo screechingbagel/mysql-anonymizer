@@ -7,6 +7,7 @@ import (
 	"text/template"
 
 	"data-anonymizer/faker"
+	"data-anonymizer/mysql"
 )
 
 // Anon holds compiled rules for all configured tables.
@@ -24,15 +25,15 @@ func New(rules map[string]map[string]*template.Template) *Anon {
 
 // Apply runs anonymization rules against a single row.
 //
-//   - colNames and vals must have the same length.
-//   - vals is modified in-place: each cell is replaced with the rule output.
+//   - colNames and cells must have the same length.
+//   - cells is modified in-place: each cell's Value is replaced and Quoted is set.
 //   - Returns (drop=true, nil) if any rule returns the ::DROP:: sentinel.
 //   - Returns (false, err) on template execution error.
 //   - If the table or a column has no rule, the original value is kept.
 //
 // Note: vals entries set to faker.SentinelNULL will be rendered as SQL NULL
 // by the parser — this package just sets the sentinel string.
-func (a *Anon) Apply(table string, colNames []string, vals []string) (drop bool, err error) {
+func (a *Anon) Apply(table string, colNames []string, cells []mysql.Cell) (drop bool, err error) {
 	tableRules, ok := a.rules[table]
 	if !ok {
 		return false, nil // no rules for this table — full pass-through
@@ -54,7 +55,8 @@ func (a *Anon) Apply(table string, colNames []string, vals []string) (drop bool,
 		case faker.SentinelDROP:
 			return true, nil
 		default:
-			vals[i] = result
+			cells[i].Value = result
+			cells[i].Quoted = true
 		}
 	}
 	return false, nil

@@ -117,8 +117,8 @@ func BenchmarkParseRow(b *testing.B) {
 	rowPayload := []byte("(" + strings.Join(cells, ",") + ")")
 
 	p := &parser{
-		cellBuf: make([]byte, 0, 256),
-		valsBuf: make([]string, 0, 16),
+		cellBuf:  make([]byte, 0, 256),
+		cellsBuf: make([]Cell, 0, 16),
 	}
 
 	b.SetBytes(int64(len(rowPayload)))

@@ -10,9 +10,22 @@ import (
 	"text/template"
 
 	"data-anonymizer/faker"
+	"data-anonymizer/mysql"
 )
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
+
+func testApply(a *Anon, table string, colNames []string, vals []string) (bool, error) {
+	cells := make([]mysql.Cell, len(vals))
+	for i, v := range vals {
+		cells[i] = mysql.Cell{Value: v}
+	}
+	drop, err := a.Apply(table, colNames, cells)
+	for i, c := range cells {
+		vals[i] = c.Value
+	}
+	return drop, err
+}
 
 // buildAnon compiles templates from a rules map of
 // table → col → template-string and returns an *Anon ready to use.
@@ -43,7 +56,7 @@ func TestApply_NoRulesForTable(t *testing.T) {
 	})
 
 	vals := []string{"keep-me", "also-keep"}
-	drop, err := a.Apply("untouched", []string{"a", "b"}, vals)
+	drop, err := testApply(a, "untouched", []string{"a", "b"}, vals)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -62,7 +75,7 @@ func TestApply_StaticTemplate(t *testing.T) {
 	})
 
 	vals := []string{"real@corp.com", "Alice"}
-	drop, err := a.Apply("users", []string{"email", "name"}, vals)
+	drop, err := testApply(a, "users", []string{"email", "name"}, vals)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -85,7 +98,7 @@ func TestApply_NullSentinel(t *testing.T) {
 	})
 
 	vals := []string{"sensitive-data"}
-	drop, err := a.Apply("t", []string{"secret"}, vals)
+	drop, err := testApply(a, "t", []string{"secret"}, vals)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -109,7 +122,7 @@ func TestApply_DropSentinel(t *testing.T) {
 	})
 
 	vals := []string{"ERROR", "sensitive log message"}
-	drop, err := a.Apply("audit", []string{"level", "msg"}, vals)
+	drop, err := testApply(a, "audit", []string{"level", "msg"}, vals)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -127,7 +140,7 @@ func TestApply_FakerEmail(t *testing.T) {
 
 	original := "john.doe@realcompany.com"
 	vals := []string{original}
-	drop, err := a.Apply("users", []string{"email"}, vals)
+	drop, err := testApply(a, "users", []string{"email"}, vals)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -156,7 +169,7 @@ func TestApply_FakerName(t *testing.T) {
 
 	original := "John Real Lastname"
 	vals := []string{original}
-	_, err := a.Apply("users", []string{"full_name"}, vals)
+	_, err := testApply(a, "users", []string{"full_name"}, vals)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -187,7 +200,7 @@ func TestApply_MultipleColumnsAllReplaced(t *testing.T) {
 	copy(vals, originals)
 	cols := []string{"email", "name", "phone", "address"}
 
-	drop, err := a.Apply("accounts", cols, vals)
+	drop, err := testApply(a, "accounts", cols, vals)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -214,7 +227,7 @@ func TestApply_RandAlphaNum(t *testing.T) {
 
 	original := "ORIGINAL-SECRET-TOKEN"
 	vals := []string{original}
-	_, err := a.Apply("tokens", []string{"token"}, vals)
+	_, err := testApply(a, "tokens", []string{"token"}, vals)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -233,7 +246,7 @@ func TestApply_UUIDv4(t *testing.T) {
 	})
 
 	vals := []string{"original-id"}
-	_, err := a.Apply("records", []string{"uid"}, vals)
+	_, err := testApply(a, "records", []string{"uid"}, vals)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -258,7 +271,7 @@ func TestApply_NilColumnNames(t *testing.T) {
 
 	vals := []string{"value1", "value2"}
 	// nil colNames — no column name → rule mapping possible.
-	drop, err := a.Apply("t", nil, vals)
+	drop, err := testApply(a, "t", nil, vals)
 	if err != nil {
 		t.Fatalf("must not error with nil colNames: %v", err)
 	}
@@ -281,7 +294,7 @@ func TestApply_RepeatCallsDoNotLeak(t *testing.T) {
 	sensitive := []string{"row1@secret.com", "row2@secret.com", "row3@secret.com"}
 	for _, orig := range sensitive {
 		vals := []string{orig}
-		_, err := a.Apply("t", []string{"email"}, vals)
+		_, err := testApply(a, "t", []string{"email"}, vals)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}

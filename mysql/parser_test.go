@@ -17,14 +17,15 @@ type staticApplier struct {
 	rules map[string]map[string]string
 }
 
-func (a *staticApplier) Apply(table string, colNames []string, vals []string) (bool, error) {
+func (a *staticApplier) Apply(table string, colNames []string, cells []Cell) (bool, error) {
 	tr, ok := a.rules[table]
 	if !ok {
 		return false, nil
 	}
 	for i, col := range colNames {
 		if v, ok := tr[col]; ok {
-			vals[i] = v
+			cells[i].Value = v
+			cells[i].Quoted = true
 		}
 	}
 	return false, nil
@@ -33,14 +34,14 @@ func (a *staticApplier) Apply(table string, colNames []string, vals []string) (b
 // dropApplier drops every row for configured tables.
 type dropApplier struct{ tables map[string]bool }
 
-func (a *dropApplier) Apply(table string, _ []string, _ []string) (bool, error) {
+func (a *dropApplier) Apply(table string, _ []string, _ []Cell) (bool, error) {
 	return a.tables[table], nil
 }
 
 // passthroughApplier makes no changes.
 type passthroughApplier struct{}
 
-func (passthroughApplier) Apply(_ string, _ []string, _ []string) (bool, error) {
+func (passthroughApplier) Apply(_ string, _ []string, _ []Cell) (bool, error) {
 	return false, nil
 }
 
