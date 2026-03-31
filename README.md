@@ -64,7 +64,7 @@ Lines that don't match a configured table/column are passed through unchanged. `
 | `fakerIBAN` | `AB12345678901234567890` |
 | `fakerSwift` | `ABCDEF12` |
 | `fakerEIN` | `12-3456789` |
-| `fakerInvoice` | `INV-00000001` (sequential, persisted to `/tmp/nxs_invoice_seq`) |
+| `fakerInvoice` | `INV-00000001` (sequential, in-memory counter, resets on restart) |
 | `uuidv4` | `550e8400-e29b-41d4-a716-446655440000` |
 | `randAlphaNum N` | random `[a-zA-Z0-9]` string of length N |
 | `randNumeric N` | random digit string of length N |
@@ -73,8 +73,8 @@ Lines that don't match a configured table/column are passed through unchanged. `
 
 | Function | Effect |
 |---|---|
-| `{{ null }}` | Writes SQL `NULL` |
-| `{{ drop }}` | Omits the entire row from output |
+| `{{ null }}` | Writes a bare SQL `NULL`. **Must be the exact and only output** of the template (e.g. `value: "{{ null }}"`). |
+| `{{ drop }}` | Omits the entire row from output. **Must be the exact and only output** of the template. |
 
 ### Utilities
 
@@ -115,7 +115,7 @@ All lines outside `INSERT INTO` statements — DDL, comments, `LOCK TABLES`, etc
 `INSERT INTO` statements are reconstructed cell-by-cell:
 
 - **Column list preserved.** If the original statement used the named-column form (`INSERT INTO \`t\` (\`a\`,\`b\`) VALUES …`), the column list is re-emitted verbatim. This is the safe form for re-import when the schema may later gain columns.
-- **Quoting style preserved.** Cells that were bare in the input (numbers, `NULL`) are written bare. Cells that were single-quoted are written single-quoted.
+- **Quoting style preserved for untouched cells.** Cells passed through without modification retain their original quoting: bare cells (numbers, `NULL`) are written bare, and single-quoted cells remain single-quoted. However, **all substituted values** (except `{{ null }}`) are unconditionally written as single-quoted strings. This relies on MySQL's implicit type coercion for numeric columns.
 - **String escaping.** Substituted string values are re-encoded using MySQL's backslash-escape convention:
 
   | Character | Encoded as |
@@ -130,5 +130,3 @@ All lines outside `INSERT INTO` statements — DDL, comments, `LOCK TABLES`, etc
 ```bash
 go build -o data-anonymizer .
 ```
-
-Requires Go 1.22+.
