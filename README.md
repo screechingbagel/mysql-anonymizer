@@ -20,7 +20,7 @@ mysqldump ... | data-anonymizer -c config.yaml --cpuprofile cpu.pprof --memprofi
 
 | Flag | Default | Description |
 |---|---|---|
-| `-c` | `/nxs-data-anonymizer.conf` | Config file path |
+| `-c` | `/data-anonymizer.conf` | Config file path |
 | `-i` | stdin | Read from file instead |
 | `-o` | stdout | Write to file instead |
 | `--cpuprofile` | | Write CPU profile to path |

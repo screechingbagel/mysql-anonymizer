@@ -6,7 +6,7 @@
 //
 // Flags:
 //
-//	-c path     config file (default /nxs-data-anonymizer.conf)
+//	-c path     config file (default /data-anonymizer.conf)
 //	-i path     input file  (default stdin)
 //	-o path     output file (default stdout)
 //	--cpuprofile path
@@ -40,7 +40,7 @@ func main() {
 
 func run() error {
 	// ─── Flags ────────────────────────────────────────────────────────────────
-	confPath := flag.String("c", "/nxs-data-anonymizer.conf", "Config file path")
+	confPath := flag.String("c", "/data-anonymizer.conf", "Config file path")
 	inputPath := flag.String("i", "", "Input file (default: stdin)")
 	outputPath := flag.String("o", "", "Output file (default: stdout)")
 	cpuProfile := flag.String("cpuprofile", "", "Write CPU profile to file")
