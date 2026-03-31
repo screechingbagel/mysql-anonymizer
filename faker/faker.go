@@ -4,8 +4,6 @@ package faker
 
 import (
 	"fmt"
-	"os"
-	"strconv"
 	"strings"
 	"sync"
 	"text/template"
@@ -37,33 +35,16 @@ func SecondaryAddress() string {
 
 // ─── Sequential invoice counter ──────────────────────────────────────────────
 
-const invoiceCounterFile = "/tmp/nxs_invoice_seq"
-const invoiceBatchSize = 1000
-
 var (
 	invoiceMu      sync.Mutex
 	invoiceCurrent int
-	invoiceMax     int
 )
 
 // Invoice returns a unique sequential invoice number, e.g. "INV-00000042".
-// Numbers are batched: a batch of 1000 is reserved from the counter file
-// at a time so concurrent processes don't collide.
+// This counter is purely in-memory and unique to the current process.
 func Invoice() string {
 	invoiceMu.Lock()
 	defer invoiceMu.Unlock()
-
-	if invoiceCurrent >= invoiceMax {
-		start := 0
-		if data, err := os.ReadFile(invoiceCounterFile); err == nil {
-			if n, err := strconv.Atoi(strings.TrimSpace(string(data))); err == nil {
-				start = n
-			}
-		}
-		invoiceCurrent = start
-		invoiceMax = start + invoiceBatchSize
-		_ = os.WriteFile(invoiceCounterFile, []byte(strconv.Itoa(invoiceMax)), 0o644)
-	}
 
 	val := invoiceCurrent
 	invoiceCurrent++
